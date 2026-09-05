@@ -77,3 +77,21 @@ func TestOpenAIStreamEmitsDeltasAndToolCalls(t *testing.T) {
 		t.Fatalf("deltas=%q final=%#v", deltas, final)
 	}
 }
+
+func TestOpenAIThinkingLevelIsMappedToRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"reasoning_effort":"high"`) {
+			t.Fatalf("request=%s", body)
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer server.Close()
+	p, err := New("openai", Config{Model: "o3-mini", BaseURL: server.URL, APIKey: "key", Thinking: "high", Client: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Complete(context.Background(), []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -114,3 +114,12 @@ func (l *Loop) Run(ctx context.Context, transcript []Message) ([]Message, string
 	}
 	return transcript, "", fmt.Errorf("agent stopped after %d tool rounds", l.MaxSteps)
 }
+
+// SetThinking forwards the interactive reasoning preference to providers that
+// expose a native thinking/reasoning parameter. Providers may ignore levels
+// they do not support while retaining the selected value for later requests.
+func (l *Loop) SetThinking(level string) {
+	if provider, ok := l.Provider.(interface{ SetThinking(string) }); ok {
+		provider.SetThinking(level)
+	}
+}

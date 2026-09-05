@@ -74,3 +74,32 @@ func TestNewCommandResetsTranscript(t *testing.T) {
 		t.Fatalf("called=%v transcript=%v lines=%v", called, m.runner.Transcript, m.lines)
 	}
 }
+
+func TestComposerSupportsCursorEditing(t *testing.T) {
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, runner: &Runner{Loop: &agent.Loop{}}, input: "ac", cursor: 1}
+	m.insertInput("b")
+	if m.input != "abc" || m.cursor != 2 {
+		t.Fatalf("insert input=%q cursor=%d", m.input, m.cursor)
+	}
+	m.deleteBeforeCursor()
+	if m.input != "ac" || m.cursor != 1 {
+		t.Fatalf("backspace input=%q cursor=%d", m.input, m.cursor)
+	}
+	m.setInput("你好")
+	m.moveCursor(-1)
+	m.insertInput("!")
+	if m.input != "你!好" {
+		t.Fatalf("unicode input=%q", m.input)
+	}
+}
+
+func TestCommandAutocompleteUsesTab(t *testing.T) {
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, runner: &Runner{Loop: &agent.Loop{}}, input: "/mod", cursor: 4}
+	if len(m.commandSuggestions()) == 0 {
+		t.Fatal("expected model suggestion")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m.input != "/model " || m.cursor != len([]rune(m.input)) {
+		t.Fatalf("input=%q cursor=%d", m.input, m.cursor)
+	}
+}

@@ -14,6 +14,16 @@ import (
 
 type google struct{ Config }
 
+func (p *google) SetThinking(level string) { p.Thinking = strings.ToLower(strings.TrimSpace(level)) }
+
+func googleThinking(level string) map[string]any {
+	budget := map[string]int{"minimal": 512, "low": 1024, "medium": 4096, "high": 8192}[strings.ToLower(strings.TrimSpace(level))]
+	if budget == 0 {
+		return nil
+	}
+	return map[string]any{"thinkingConfig": map[string]any{"thinkingBudget": budget}}
+}
+
 func (p *google) Stream(ctx context.Context, messages []agent.Message, tools []agent.ToolDefinition) (<-chan agent.StreamEvent, error) {
 	type part struct {
 		Text         string `json:"text,omitempty"`
@@ -34,7 +44,8 @@ func (p *google) Stream(ctx context.Context, messages []agent.Message, tools []a
 		SystemInstruction *content         `json:"systemInstruction,omitempty"`
 		Contents          []content        `json:"contents"`
 		Tools             []map[string]any `json:"tools,omitempty"`
-	}{}
+		GenerationConfig  map[string]any   `json:"generationConfig,omitempty"`
+	}{GenerationConfig: googleThinking(p.Thinking)}
 	if p.SystemPrompt != "" {
 		body.SystemInstruction = &content{Parts: []part{{Text: p.SystemPrompt}}}
 	}
@@ -96,6 +107,7 @@ func (p *google) Stream(ctx context.Context, messages []agent.Message, tools []a
 		defer resp.Body.Close()
 		message := agent.Message{Role: "assistant"}
 		calls := map[string]*agent.ToolCall{}
+		var usage *agent.Usage
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 4096), 1024*1024)
 		for scanner.Scan() {
@@ -107,8 +119,19 @@ func (p *google) Stream(ctx context.Context, messages []agent.Message, tools []a
 				Candidates []struct {
 					Content content `json:"content"`
 				} `json:"candidates"`
+				UsageMetadata struct {
+					PromptTokenCount     int `json:"promptTokenCount"`
+					CandidatesTokenCount int `json:"candidatesTokenCount"`
+					TotalTokenCount      int `json:"totalTokenCount"`
+				} `json:"usageMetadata"`
 			}
-			if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &result) != nil || len(result.Candidates) == 0 {
+			if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &result) != nil {
+				continue
+			}
+			if result.UsageMetadata.TotalTokenCount > 0 {
+				usage = &agent.Usage{InputTokens: result.UsageMetadata.PromptTokenCount, OutputTokens: result.UsageMetadata.CandidatesTokenCount, TotalTokens: result.UsageMetadata.TotalTokenCount}
+			}
+			if len(result.Candidates) == 0 {
 				continue
 			}
 			for _, piece := range result.Candidates[0].Content.Parts {
@@ -134,6 +157,7 @@ func (p *google) Stream(ctx context.Context, messages []agent.Message, tools []a
 		for _, call := range calls {
 			message.ToolCalls = append(message.ToolCalls, *call)
 		}
+		message.Usage = usage
 		out <- agent.StreamEvent{Type: "done", Message: &message}
 	}()
 	return out, nil
@@ -159,7 +183,8 @@ func (p *google) Complete(ctx context.Context, messages []agent.Message, tools [
 		SystemInstruction *content         `json:"systemInstruction,omitempty"`
 		Contents          []content        `json:"contents"`
 		Tools             []map[string]any `json:"tools,omitempty"`
-	}{}
+		GenerationConfig  map[string]any   `json:"generationConfig,omitempty"`
+	}{GenerationConfig: googleThinking(p.Thinking)}
 	if p.SystemPrompt != "" {
 		body.SystemInstruction = &content{Parts: []part{{Text: p.SystemPrompt}}}
 	}
@@ -218,6 +243,11 @@ func (p *google) Complete(ctx context.Context, messages []agent.Message, tools [
 		Candidates []struct {
 			Content content `json:"content"`
 		}
+		UsageMetadata struct {
+			PromptTokenCount     int `json:"promptTokenCount"`
+			CandidatesTokenCount int `json:"candidatesTokenCount"`
+			TotalTokenCount      int `json:"totalTokenCount"`
+		} `json:"usageMetadata"`
 	}
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return agent.Message{}, err
@@ -226,6 +256,9 @@ func (p *google) Complete(ctx context.Context, messages []agent.Message, tools [
 		return agent.Message{}, fmt.Errorf("google returned no candidates")
 	}
 	out := agent.Message{Role: "assistant"}
+	if result.UsageMetadata.TotalTokenCount > 0 {
+		out.Usage = &agent.Usage{InputTokens: result.UsageMetadata.PromptTokenCount, OutputTokens: result.UsageMetadata.CandidatesTokenCount, TotalTokens: result.UsageMetadata.TotalTokenCount}
+	}
 	for _, piece := range result.Candidates[0].Content.Parts {
 		if piece.Text != "" {
 			out.Content += piece.Text

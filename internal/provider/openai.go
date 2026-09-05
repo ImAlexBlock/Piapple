@@ -13,6 +13,9 @@ import (
 )
 
 type openAI struct{ Config }
+
+func (p *openAI) SetThinking(level string) { p.Thinking = strings.ToLower(strings.TrimSpace(level)) }
+
 type openAIMessage struct {
 	Role       string           `json:"role"`
 	Content    string           `json:"content,omitempty"`
@@ -20,14 +23,21 @@ type openAIMessage struct {
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 }
 type openAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	Tools       []any           `json:"tools,omitempty"`
-	Temperature float64         `json:"temperature"`
-	Stream      bool            `json:"stream,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []openAIMessage `json:"messages"`
+	Tools           []any           `json:"tools,omitempty"`
+	Temperature     float64         `json:"temperature"`
+	Stream          bool            `json:"stream,omitempty"`
+	StreamOptions   map[string]any  `json:"stream_options,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 }
 
 type openAIStreamChunk struct {
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage,omitempty"`
 	Choices []struct {
 		Delta struct {
 			Content   string `json:"content"`
@@ -52,13 +62,18 @@ type openAIToolCall struct {
 	} `json:"function"`
 }
 
+func openAIReasoningEffort(level string) string {
+	level = strings.ToLower(strings.TrimSpace(level))
+	switch level {
+	case "minimal", "low", "medium", "high":
+		return level
+	default:
+		return ""
+	}
+}
+
 func (p *openAI) Complete(ctx context.Context, messages []agent.Message, tools []agent.ToolDefinition) (agent.Message, error) {
-	body := struct {
-		Model       string          `json:"model"`
-		Messages    []openAIMessage `json:"messages"`
-		Tools       []any           `json:"tools,omitempty"`
-		Temperature float64         `json:"temperature"`
-	}{Model: p.Model, Temperature: 0}
+	body := openAIRequest{Model: p.Model, Temperature: 0, ReasoningEffort: openAIReasoningEffort(p.Thinking)}
 	if p.SystemPrompt != "" {
 		body.Messages = append(body.Messages, openAIMessage{Role: "system", Content: p.SystemPrompt})
 	}
@@ -97,6 +112,11 @@ func (p *openAI) Complete(ctx context.Context, messages []agent.Message, tools [
 		Choices []struct {
 			Message openAIMessage `json:"message"`
 		}
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err = json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return agent.Message{}, err
@@ -106,13 +126,16 @@ func (p *openAI) Complete(ctx context.Context, messages []agent.Message, tools [
 	}
 	m := decoded.Choices[0].Message
 	out := agent.Message{Role: "assistant", Content: m.Content}
+	if decoded.Usage.TotalTokens > 0 {
+		out.Usage = &agent.Usage{InputTokens: decoded.Usage.PromptTokens, OutputTokens: decoded.Usage.CompletionTokens, TotalTokens: decoded.Usage.TotalTokens}
+	}
 	for _, c := range m.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, agent.ToolCall{ID: c.ID, Name: c.Function.Name, Arguments: c.Function.Arguments})
 	}
 	return out, nil
 }
 func (p *openAI) Stream(ctx context.Context, messages []agent.Message, tools []agent.ToolDefinition) (<-chan agent.StreamEvent, error) {
-	body := openAIRequest{Model: p.Model, Temperature: 0, Stream: true}
+	body := openAIRequest{Model: p.Model, Temperature: 0, ReasoningEffort: openAIReasoningEffort(p.Thinking), Stream: true, StreamOptions: map[string]any{"include_usage": true}}
 	if p.SystemPrompt != "" {
 		body.Messages = append(body.Messages, openAIMessage{Role: "system", Content: p.SystemPrompt})
 	}
@@ -153,6 +176,7 @@ func (p *openAI) Stream(ctx context.Context, messages []agent.Message, tools []a
 		defer resp.Body.Close()
 		message := agent.Message{Role: "assistant"}
 		calls := map[int]*agent.ToolCall{}
+		var usage *agent.Usage
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 4096), 1024*1024)
 		for scanner.Scan() {
@@ -195,6 +219,7 @@ func (p *openAI) Stream(ctx context.Context, messages []agent.Message, tools []a
 				message.ToolCalls = append(message.ToolCalls, *call)
 			}
 		}
+		message.Usage = usage
 		out <- agent.StreamEvent{Type: "done", Message: &message}
 	}()
 	return out, nil

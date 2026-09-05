@@ -47,6 +47,7 @@ type model struct {
 	runner        *Runner
 	ctx           context.Context
 	input         string
+	cursor        int // rune offset in input
 	lines         []string
 	history       []string
 	historyPos    int
@@ -55,8 +56,10 @@ type model struct {
 	scroll        int
 	follow        bool
 	streaming     string
+	usage         *agent.Usage
 	picker        bool
 	pickerIndex   int
+	commandIndex  int
 	width, height int
 }
 
@@ -72,6 +75,7 @@ var (
 	footerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#616161"))
 	inputBoxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#5C6BC0")).Padding(0, 1)
 	busyBoxStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#FFA726")).Padding(0, 1)
+	codeStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#B0BEC5")).Background(lipgloss.Color("#263238"))
 )
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -147,17 +151,67 @@ func (m *model) composerBox(width int) string {
 	if innerWidth < 16 {
 		innerWidth = 16
 	}
-	wrapped := strings.Split(wrap(m.input, innerWidth), "\n")
+	wrapped := strings.Split(wrap(m.inputWithCursor(), innerWidth), "\n")
 	if len(wrapped) == 0 {
-		wrapped = []string{""}
+		wrapped = []string{"▌"}
 	}
-	last := len(wrapped) - 1
-	wrapped[last] += "▌"
 	box := inputBoxStyle
 	if m.busy {
 		box = busyBoxStyle
 	}
 	return box.Width(width - 2).Render(strings.Join(wrapped, "\n"))
+}
+
+func (m *model) commandSuggestions() []commands.Definition {
+	trimmed := strings.TrimSpace(m.input)
+	if !strings.HasPrefix(trimmed, "/") || strings.ContainsAny(trimmed, " \t\n") {
+		return nil
+	}
+	prefix := strings.TrimPrefix(trimmed, "/")
+	defs := append([]commands.Definition{{Name: "help", Description: "Show commands"}, {Name: "clear", Description: "Clear conversation view"}}, commands.Builtins...)
+	out := make([]commands.Definition, 0, len(defs))
+	for _, definition := range defs {
+		if prefix == "" || strings.HasPrefix(definition.Name, prefix) {
+			out = append(out, definition)
+		}
+	}
+	return out
+}
+
+func (m *model) commandSuggestionView(width int) string {
+	items := m.commandSuggestions()
+	if len(items) == 0 {
+		return ""
+	}
+	if m.commandIndex >= len(items) {
+		m.commandIndex = len(items) - 1
+	}
+	if m.commandIndex < 0 {
+		m.commandIndex = 0
+	}
+	var b strings.Builder
+	for i, item := range items {
+		line := "  /" + item.Name
+		if item.ArgumentHint != "" {
+			line += " " + hintStyle.Render(item.ArgumentHint)
+		}
+		line += "  " + dimStyle.Render(item.Description)
+		if i == m.commandIndex {
+			line = commandStyle.Render("›") + line[1:]
+		}
+		b.WriteString(line)
+		if i+1 < len(items) {
+			b.WriteByte('\n')
+		}
+	}
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#7E57C2")).Padding(0, 1).Width(width - 2).Render(b.String())
+}
+
+func (m *model) commandSuggestionHeight(width int) int {
+	if len(m.commandSuggestions()) == 0 {
+		return 0
+	}
+	return lipgloss.Height(m.commandSuggestionView(width)) + 1
 }
 
 func (m *model) pickerHeight() int {
@@ -191,7 +245,7 @@ func (m *model) pickerView(width int) string {
 
 func (m *model) composerHeight(width int) int {
 	boxHeight := lipgloss.Height(m.composerBox(width))
-	return boxHeight + 2 + m.pickerHeight() // picker, status and shortcut rows
+	return boxHeight + 2 + m.pickerHeight() + m.commandSuggestionHeight(width) // picker, suggestions, status and shortcut rows
 }
 
 func (m *model) composerView(width int) string {
@@ -226,12 +280,71 @@ func (m *model) selectPickedModel() tea.Cmd {
 	return nil
 }
 
+func (m *model) setInput(value string) {
+	m.input = value
+	m.cursor = len([]rune(value))
+}
+
+func (m *model) insertInput(value string) {
+	runes := []rune(m.input)
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor > len(runes) {
+		m.cursor = len(runes)
+	}
+	runes = append(runes[:m.cursor], append([]rune(value), runes[m.cursor:]...)...)
+	m.input = string(runes)
+	m.cursor += len([]rune(value))
+}
+
+func (m *model) deleteBeforeCursor() {
+	runes := []rune(m.input)
+	if m.cursor <= 0 || len(runes) == 0 {
+		return
+	}
+	runes = append(runes[:m.cursor-1], runes[m.cursor:]...)
+	m.input = string(runes)
+	m.cursor--
+}
+
+func (m *model) deleteAtCursor() {
+	runes := []rune(m.input)
+	if m.cursor < 0 || m.cursor >= len(runes) {
+		return
+	}
+	runes = append(runes[:m.cursor], runes[m.cursor+1:]...)
+	m.input = string(runes)
+}
+
+func (m *model) moveCursor(delta int) {
+	m.cursor += delta
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor > len([]rune(m.input)) {
+		m.cursor = len([]rune(m.input))
+	}
+}
+
+func (m *model) inputWithCursor() string {
+	runes := []rune(m.input)
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor > len(runes) {
+		m.cursor = len(runes)
+	}
+	return string(runes[:m.cursor]) + "▌" + string(runes[m.cursor:])
+}
+
 func (m *model) submit() tea.Cmd {
 	text := strings.TrimSpace(m.input)
 	if text == "" || m.busy {
 		return nil
 	}
 	m.input = ""
+	m.cursor = 0
 	m.history = append(m.history, text)
 	m.historyPos = -1
 	if strings.HasPrefix(text, "!") {
@@ -560,6 +673,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if suggestions := m.commandSuggestions(); len(suggestions) > 0 {
+			switch v.String() {
+			case "tab":
+				item := suggestions[m.commandIndex]
+				m.setInput("/" + item.Name + " ")
+				return m, nil
+			case "up":
+				if m.commandIndex > 0 {
+					m.commandIndex--
+				}
+				return m, nil
+			case "down":
+				if m.commandIndex < len(suggestions)-1 {
+					m.commandIndex++
+				}
+				return m, nil
+			}
+		}
 		switch v.String() {
 		case "ctrl+c":
 			if m.busy {
@@ -573,11 +704,32 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			return m, m.submit()
 		case "alt+enter", "ctrl+j":
-			m.input += "\n"
+			m.insertInput("\n")
+		case "left":
+			m.moveCursor(-1)
+		case "right":
+			m.moveCursor(1)
 		case "backspace":
-			if len(m.input) > 0 {
-				r := []rune(m.input)
-				m.input = string(r[:len(r)-1])
+			m.deleteBeforeCursor()
+		case "delete":
+			m.deleteAtCursor()
+		case "ctrl+a":
+			m.cursor = 0
+		case "ctrl+e":
+			m.cursor = len([]rune(m.input))
+		case "ctrl+w":
+			runes := []rune(m.input)
+			if m.cursor > 0 {
+				start := m.cursor
+				for start > 0 && runes[start-1] == ' ' {
+					start--
+				}
+				for start > 0 && runes[start-1] != ' ' {
+					start--
+				}
+				runes = append(runes[:start], runes[m.cursor:]...)
+				m.input = string(runes)
+				m.cursor = start
 			}
 		case "up":
 			if len(m.history) > 0 {
@@ -587,15 +739,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.historyPos > 0 {
 					m.historyPos--
 				}
-				m.input = m.history[m.historyPos]
+				m.setInput(m.history[m.historyPos])
 			}
 		case "down":
 			if m.historyPos >= 0 && m.historyPos < len(m.history)-1 {
 				m.historyPos++
-				m.input = m.history[m.historyPos]
+				m.setInput(m.history[m.historyPos])
 			} else {
 				m.historyPos = -1
-				m.input = ""
+				m.setInput("")
 			}
 		case "pgup", "ctrl+u":
 			m.follow = false
@@ -616,7 +768,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lines = nil
 		default:
 			if v.Type == tea.KeyRunes {
-				m.input += string(v.Runes)
+				m.insertInput(string(v.Runes))
 			}
 		}
 	}
@@ -685,6 +837,10 @@ func (m *model) View() string {
 	}
 	b.WriteString(strings.Repeat("─", width))
 	b.WriteByte('\n')
+	if suggestions := m.commandSuggestionView(width); suggestions != "" && !m.picker {
+		b.WriteString(suggestions)
+		b.WriteByte('\n')
+	}
 	if m.picker {
 		b.WriteString(m.pickerView(width))
 		b.WriteByte('\n')

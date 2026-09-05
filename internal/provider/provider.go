@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	Model, BaseURL, APIKey, SystemPrompt string
+	Thinking                             string
 	Client                               *http.Client
 }
 
@@ -36,3 +37,5 @@ func New(name string, cfg Config) (agent.Provider, error) {
 func Supported() []string {
 	return []string{"anthropic", "deepseek", "fireworks", "github", "google", "groq", "minimax", "mistral", "moonshot", "openai", "openrouter", "perplexity", "qwen", "siliconflow", "together", "xai", "zai"}
 }
+
+type ThinkingProvider interface{ SetThinking(string) }

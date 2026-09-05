@@ -13,6 +13,24 @@ import (
 
 type anthropic struct{ Config }
 
+func (p *anthropic) SetThinking(level string) { p.Thinking = strings.ToLower(strings.TrimSpace(level)) }
+
+func anthropicMaxTokens(level string) int {
+	budget := map[string]int{"minimal": 1024, "low": 2048, "medium": 4096, "high": 8192}[strings.ToLower(strings.TrimSpace(level))]
+	if budget == 0 {
+		return 4096
+	}
+	return budget + 4096
+}
+
+func anthropicThinking(level string) map[string]any {
+	budget := map[string]int{"minimal": 1024, "low": 2048, "medium": 4096, "high": 8192}[strings.ToLower(strings.TrimSpace(level))]
+	if budget == 0 {
+		return nil
+	}
+	return map[string]any{"type": "enabled", "budget_tokens": budget}
+}
+
 func (p *anthropic) Stream(ctx context.Context, messages []agent.Message, tools []agent.ToolDefinition) (<-chan agent.StreamEvent, error) {
 	type content struct {
 		Type      string          `json:"type"`
@@ -33,8 +51,9 @@ func (p *anthropic) Stream(ctx context.Context, messages []agent.Message, tools 
 		System    string           `json:"system,omitempty"`
 		Messages  []message        `json:"messages"`
 		Tools     []map[string]any `json:"tools,omitempty"`
+		Thinking  map[string]any   `json:"thinking,omitempty"`
 		Stream    bool             `json:"stream"`
-	}{Model: p.Model, MaxTokens: 4096, System: p.SystemPrompt, Stream: true}
+	}{Model: p.Model, MaxTokens: anthropicMaxTokens(p.Thinking), System: p.SystemPrompt, Stream: true, Thinking: anthropicThinking(p.Thinking)}
 	for _, m := range messages {
 		if m.Role == "tool" {
 			body.Messages = append(body.Messages, message{Role: "user", Content: []content{{Type: "tool_result", ToolUseID: m.ToolCallID, Content: m.Content}}})
@@ -83,6 +102,7 @@ func (p *anthropic) Stream(ctx context.Context, messages []agent.Message, tools 
 		message := agent.Message{Role: "assistant"}
 		calls := map[int]*agent.ToolCall{}
 		currentBlock := -1
+		usage := &agent.Usage{}
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 4096), 1024*1024)
 		for scanner.Scan() {
@@ -91,8 +111,12 @@ func (p *anthropic) Stream(ctx context.Context, messages []agent.Message, tools 
 				continue
 			}
 			var event struct {
-				Type         string  `json:"type"`
-				Index        int     `json:"index"`
+				Type  string `json:"type"`
+				Index int    `json:"index"`
+				Usage struct {
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
 				ContentBlock content `json:"content_block"`
 				Delta        struct {
 					Type        string `json:"type"`
@@ -102,6 +126,12 @@ func (p *anthropic) Stream(ctx context.Context, messages []agent.Message, tools 
 			}
 			if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &event) != nil {
 				continue
+			}
+			if event.Usage.InputTokens > 0 {
+				usage.InputTokens = event.Usage.InputTokens
+			}
+			if event.Usage.OutputTokens > 0 {
+				usage.OutputTokens = event.Usage.OutputTokens
 			}
 			switch event.Type {
 			case "content_block_start":
@@ -128,6 +158,10 @@ func (p *anthropic) Stream(ctx context.Context, messages []agent.Message, tools 
 				message.ToolCalls = append(message.ToolCalls, *call)
 			}
 		}
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+		if usage.TotalTokens > 0 {
+			message.Usage = usage
+		}
 		out <- agent.StreamEvent{Type: "done", Message: &message}
 	}()
 	return out, nil
@@ -153,7 +187,8 @@ func (p *anthropic) Complete(ctx context.Context, messages []agent.Message, tool
 		System    string           `json:"system,omitempty"`
 		Messages  []message        `json:"messages"`
 		Tools     []map[string]any `json:"tools,omitempty"`
-	}{Model: p.Model, MaxTokens: 4096, System: p.SystemPrompt}
+		Thinking  map[string]any   `json:"thinking,omitempty"`
+	}{Model: p.Model, MaxTokens: anthropicMaxTokens(p.Thinking), System: p.SystemPrompt, Thinking: anthropicThinking(p.Thinking)}
 	for _, m := range messages {
 		if m.Role == "tool" {
 			body.Messages = append(body.Messages, message{Role: "user", Content: []content{{Type: "tool_result", ToolUseID: m.ToolCallID, Content: m.Content}}})
@@ -196,11 +231,18 @@ func (p *anthropic) Complete(ctx context.Context, messages []agent.Message, tool
 	}
 	var result struct {
 		Content []content `json:"content"`
+		Usage   struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	}
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return agent.Message{}, err
 	}
 	out := agent.Message{Role: "assistant"}
+	if result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0 {
+		out.Usage = &agent.Usage{InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens, TotalTokens: result.Usage.InputTokens + result.Usage.OutputTokens}
+	}
 	for _, c := range result.Content {
 		if c.Type == "text" {
 			out.Content += c.Text

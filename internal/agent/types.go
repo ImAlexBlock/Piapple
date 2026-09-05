@@ -2,9 +2,16 @@ package agent
 
 import "context"
 
+type Usage struct {
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
+	TotalTokens  int `json:"total_tokens,omitempty"`
+}
+
 type Message struct {
 	Role       string     `json:"role"`
 	Content    string     `json:"content,omitempty"`
+	Usage      *Usage     `json:"usage,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 }

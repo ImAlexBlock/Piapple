@@ -29,6 +29,7 @@ func main() {
 	flag.StringVar(&cfg.BaseURL, "base-url", "", "provider base URL")
 	flag.StringVar(&cfg.APIKey, "api-key", "", "API key (defaults to provider environment variable)")
 	flag.StringVar(&cfg.SystemPrompt, "system", "You are Piapple, a concise expert coding assistant. Inspect before editing and explain completed work.", "system prompt")
+	flag.StringVar(&cfg.Thinking, "thinking", "", "thinking level: off, minimal, low, medium, or high")
 	flag.IntVar(&cfg.MaxSteps, "max-steps", 12, "maximum model/tool rounds")
 	flag.StringVar(&cfg.Workdir, "C", ".", "working directory")
 	flag.StringVar(&cfg.Workdir, "cwd", ".", "working directory")
@@ -134,6 +135,9 @@ func main() {
 			}
 		}
 	}
+	if repository != nil && cfg.Thinking == "" {
+		cfg.Thinking = repository.Thinking()
+	}
 	initialProvider := cfg.Provider
 	createLoop := func(providerID, modelID string) (*agent.Loop, error) {
 		key := ""
@@ -161,7 +165,7 @@ func main() {
 		if providerID == initialProvider && cliBaseURL != "" {
 			baseURL = cliBaseURL
 		}
-		p, createErr := provider.New(providerID, provider.Config{Model: modelID, BaseURL: baseURL, APIKey: key, SystemPrompt: cfg.SystemPrompt})
+		p, createErr := provider.New(providerID, provider.Config{Model: modelID, BaseURL: baseURL, APIKey: key, SystemPrompt: cfg.SystemPrompt, Thinking: cfg.Thinking})
 		if createErr != nil {
 			return nil, createErr
 		}
