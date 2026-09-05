@@ -31,6 +31,7 @@ func main() {
 	flag.StringVar(&cfg.SystemPrompt, "system", "You are Piapple, a concise expert coding assistant. Inspect before editing and explain completed work.", "system prompt")
 	flag.IntVar(&cfg.MaxSteps, "max-steps", 12, "maximum model/tool rounds")
 	flag.StringVar(&cfg.Workdir, "C", ".", "working directory")
+	flag.StringVar(&cfg.Workdir, "cwd", ".", "working directory")
 	flag.StringVar(&cfg.SessionPath, "session", "", "session JSONL file")
 	continueSession := flag.Bool("continue", false, "continue the most recent project session")
 	flag.BoolVar(continueSession, "c", false, "continue the most recent project session")
@@ -38,6 +39,8 @@ func main() {
 	printMode := flag.Bool("p", false, "print the answer without starting the TUI")
 	flag.BoolVar(printMode, "print", false, "print the answer without starting the TUI")
 	jsonMode := flag.Bool("json", false, "print the final answer as JSON")
+	// Pi documents long options with `--`; normalize them before Go's flag parser.
+	os.Args = append([]string{os.Args[0]}, normalizeLongOptions(os.Args[1:])...)
 	flag.Parse()
 	// Keep raw CLI overrides separate from resolved settings so switching models
 	// later does not accidentally reuse an API key or endpoint for another provider.
@@ -437,6 +440,16 @@ func main() {
 		fatal(err.Error())
 	}
 }
+func normalizeLongOptions(args []string) []string {
+	out := append([]string(nil), args...)
+	for i, arg := range out {
+		if strings.HasPrefix(arg, "--") && arg != "--" {
+			out[i] = "-" + strings.TrimPrefix(arg, "--")
+		}
+	}
+	return out
+}
+
 func startupConfigurationError(cfg config.Config) string {
 	if cfg.Provider == "" || cfg.Model == "" {
 		return "No model selected. Start with -provider <provider> -model <model-id>."
