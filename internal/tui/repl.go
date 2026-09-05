@@ -17,6 +17,7 @@ type Runner struct {
 	Out        io.Writer
 	Transcript []agent.Message
 	Persist    func([]agent.Message) error
+	Notice     string
 }
 type resultMsg struct {
 	messages []agent.Message
@@ -53,7 +54,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.Loop == nil {
 		return fmt.Errorf("tui: nil agent loop")
 	}
-	_, err := tea.NewProgram(&model{runner: r, ctx: ctx, historyPos: -1, follow: true}, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+	initialLines := []string{}
+	if r.Notice != "" {
+		initialLines = append(initialLines, r.Notice)
+	}
+	_, err := tea.NewProgram(&model{runner: r, ctx: ctx, historyPos: -1, follow: true, lines: initialLines}, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	return err
 }
 func (m *model) Init() tea.Cmd { return nil }
@@ -126,7 +131,7 @@ func (m *model) submit() tea.Cmd {
 	m.historyPos = -1
 	switch text {
 	case "/help":
-		m.emit("/help  /clear  /exit\nEnter sends a prompt. Alt+Enter inserts a newline.")
+		m.emit("/help  /clear  /exit\nEnter sends a prompt. Alt+Enter inserts a newline.\nPiapple does not choose a model automatically; configure one with -model.")
 		return nil
 	case "/clear":
 		m.lines = nil
@@ -135,6 +140,10 @@ func (m *model) submit() tea.Cmd {
 		return nil
 	case "/exit", "/quit":
 		return tea.Quit
+	}
+	if m.runner.Loop == nil || m.runner.Loop.Provider == nil {
+		m.emit("No model is configured. Restart with -model <model-id> and the provider API key.")
+		return nil
 	}
 	m.emit(userStyle.Render("> ") + text)
 	m.busy = true

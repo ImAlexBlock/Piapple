@@ -18,7 +18,7 @@ import (
 
 func main() {
 	var cfg config.Config
-	flag.StringVar(&cfg.Provider, "provider", "openai", "provider: openai, anthropic, or google")
+	flag.StringVar(&cfg.Provider, "provider", "", "provider: openai, anthropic, or google")
 	flag.StringVar(&cfg.Model, "model", "", "model ID")
 	flag.StringVar(&cfg.BaseURL, "base-url", "", "provider base URL")
 	flag.StringVar(&cfg.APIKey, "api-key", "", "API key (defaults to provider environment variable)")
@@ -27,9 +27,6 @@ func main() {
 	flag.StringVar(&cfg.Workdir, "C", ".", "working directory")
 	flag.StringVar(&cfg.SessionPath, "session", "", "JSONL session path")
 	flag.Parse()
-	if cfg.Model == "" {
-		cfg.Model = config.DefaultModel(cfg.Provider)
-	}
 	var err error
 	cfg.Workdir, err = filepath.Abs(cfg.Workdir)
 	if err != nil {
@@ -41,15 +38,15 @@ func main() {
 	if cfg.APIKey == "" {
 		cfg.APIKey = config.APIKeyFromEnvironment(cfg.Provider)
 	}
-	if cfg.APIKey == "" {
-		fatal(fmt.Sprintf("no API key configured for %s; set %s or pass -api-key (selected model: %s)", cfg.Provider, config.EnvironmentVariable(cfg.Provider), cfg.Model))
-	}
 	if cfg.SessionPath != "" && !filepath.IsAbs(cfg.SessionPath) {
 		cfg.SessionPath = filepath.Join(cfg.Workdir, cfg.SessionPath)
 	}
-	p, err := provider.New(cfg.Provider, provider.Config{Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, SystemPrompt: cfg.SystemPrompt})
-	if err != nil {
-		fatal(err.Error())
+	var p agent.Provider
+	if cfg.Model != "" && cfg.APIKey != "" {
+		p, err = provider.New(cfg.Provider, provider.Config{Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, SystemPrompt: cfg.SystemPrompt})
+		if err != nil {
+			fatal(err.Error())
+		}
 	}
 	builtins := tools.Builtins{Workdir: cfg.Workdir}
 	loop := agent.NewLoop(p, builtins.All(), cfg.MaxSteps, func(e agent.Event) {
@@ -63,6 +60,9 @@ func main() {
 	}
 	prompt := strings.TrimSpace(strings.Join(flag.Args(), " "))
 	if prompt != "" {
+		if p == nil {
+			fatal(startupConfigurationError(cfg))
+		}
 		before := len(transcript)
 		transcript = append(transcript, agent.Message{Role: "user", Content: prompt})
 		updated, answer, err := loop.Run(context.Background(), transcript)
@@ -75,9 +75,27 @@ func main() {
 		fmt.Println(answer)
 		return
 	}
-	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Persist: func(messages []agent.Message) error { return session.Append(cfg.SessionPath, messages) }}
+	notice := startupNotice(cfg)
+	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: func(messages []agent.Message) error { return session.Append(cfg.SessionPath, messages) }}
 	if err := runner.Run(context.Background()); err != nil {
 		fatal(err.Error())
 	}
 }
+func startupConfigurationError(cfg config.Config) string {
+	if cfg.Provider == "" || cfg.Model == "" {
+		return "No model selected. Start with -provider <provider> -model <model-id>."
+	}
+	return fmt.Sprintf("No API key found for %s. Set the provider environment variable or pass -api-key.", cfg.Provider)
+}
+
+func startupNotice(cfg config.Config) string {
+	if cfg.Provider == "" || cfg.Model == "" {
+		return "No model selected. Use -provider <provider> -model <model-id> to start a model session."
+	}
+	if cfg.APIKey == "" {
+		return fmt.Sprintf("No API key found for %s. Set its environment variable or pass -api-key, then restart Piapple.", cfg.Provider)
+	}
+	return ""
+}
+
 func fatal(message string) { fmt.Fprintln(os.Stderr, "piapple:", message); os.Exit(1) }

@@ -15,31 +15,28 @@ Piapple is a small, cross-platform Go coding agent inspired by [Pi](https://gith
 
 ## Quick start
 
-The model flag is optional. Piapple defaults to `openai / gpt-4o-mini`, so after configuring a key you can start the full-screen UI directly:
+Piapple follows Pi's model-selection behavior: it does not invent a provider or model. Start the TUI directly, then configure a model through the command line for now:
+
+```powershell
+.\dist\piapple.exe
+.\dist\piapple.exe -provider openai -model gpt-4o-mini
+```
+
+API keys can be supplied by the provider environment variable or `-api-key`:
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-.\dist\piapple.exe
-# Or from source
-go run ./cmd/piapple
-```
-
-Other providers select a practical default model automatically:
-
-```powershell
-$env:ANTHROPIC_API_KEY = "..."
-.\dist\piapple.exe -provider anthropic
+.\dist\piapple.exe -provider openai -model gpt-4o-mini
 ```
 
 One-shot mode remains available for scripts:
 
 ```powershell
-.\dist\piapple.exe "Explain this repository"
+.\dist\piapple.exe -provider anthropic -model claude-sonnet-4-5 "Explain this repository"
 ```
 
 Optional flags: `-provider`, `-model`, `-base-url`, `-api-key`, `-system`, `-max-steps`, `-C`, and `-session`.
-If no API key is configured, Piapple now reports the exact environment variable or flag required.
-
+When no model is configured, Piapple still opens the TUI and shows the setup state instead of terminating before the interface starts.
 ## Safety
 
 Like upstream Pi, Piapple executes tools with the permissions of its own process. Run it in a container or sandbox for untrusted repositories.
