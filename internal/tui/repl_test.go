@@ -14,10 +14,17 @@ func TestViewportScrollKeepsComposerAtBottom(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		m.emit("line " + string(rune('A'+i%26)))
 	}
+	empty := m.View()
+	if strings.Contains(empty, "Type a message...") || strings.Contains(empty, "piapple>") {
+		t.Fatal("empty composer should not render placeholder text")
+	}
 	m.input = "draft"
 	before := m.View()
 	if !strings.Contains(before, "draft") {
 		t.Fatal("composer is missing")
+	}
+	if strings.Contains(before, "piapple>") {
+		t.Fatal("composer should not render a prompt prefix")
 	}
 	if !strings.Contains(before, "╭") || !strings.Contains(before, "╰") {
 		t.Fatal("composer is not rendered as a bordered box")

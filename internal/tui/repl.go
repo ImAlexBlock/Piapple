@@ -39,18 +39,17 @@ type model struct {
 }
 
 var (
-	titleStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-	userStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
-	dimStyle         = lipgloss.NewStyle().Faint(true)
-	toolStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA726"))
-	readyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#66BB6A"))
-	keyStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#80CBC4"))
-	hintStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#9E9E9E"))
-	commandStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#CE93D8"))
-	footerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#616161"))
-	inputBoxStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#5C6BC0")).Padding(0, 1)
-	busyBoxStyle     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#FFA726")).Padding(0, 1)
-	placeholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#757575")).Italic(true)
+	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
+	userStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
+	dimStyle      = lipgloss.NewStyle().Faint(true)
+	toolStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA726"))
+	readyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#66BB6A"))
+	keyStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#80CBC4"))
+	hintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#9E9E9E"))
+	commandStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#CE93D8"))
+	footerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#616161"))
+	inputBoxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#5C6BC0")).Padding(0, 1)
+	busyBoxStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#FFA726")).Padding(0, 1)
 )
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -113,20 +112,9 @@ func (m *model) composerBox(width int) string {
 	if innerWidth < 16 {
 		innerWidth = 16
 	}
-	input := m.input
-	if input == "" {
-		input = placeholderStyle.Render("Type a message...")
-	}
-	wrapped := strings.Split(wrap(input, innerWidth), "\n")
-	for index, line := range wrapped {
-		prefix := "         "
-		if index == 0 {
-			prefix = userStyle.Render("piapple> ")
-		}
-		wrapped[index] = prefix + line
-	}
+	wrapped := strings.Split(wrap(m.input, innerWidth), "\n")
 	if len(wrapped) == 0 {
-		wrapped = []string{userStyle.Render("piapple> ")}
+		wrapped = []string{""}
 	}
 	last := len(wrapped) - 1
 	wrapped[last] += "▌"
