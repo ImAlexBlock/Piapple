@@ -96,6 +96,7 @@ func main() {
 	var sessionDir string
 	if !*noSession {
 		if cfg.SessionPath != "" {
+			sessionDir = filepath.Dir(cfg.SessionPath)
 			repository, err = session.Open(cfg.SessionPath)
 		} else {
 			sessionDir = session.DefaultDirectory(home, cfg.Workdir)
@@ -300,6 +301,137 @@ func main() {
 		}
 		projectSettings.DefaultModel = &settings.ModelRef{Provider: providerID, ID: modelID}
 		return settings.Save(settings.ProjectPath(cfg.Workdir), projectSettings)
+	}
+	resolveSessionPath := func(value string) string {
+		value = strings.TrimSpace(value)
+		if !filepath.IsAbs(value) {
+			value = filepath.Join(cfg.Workdir, value)
+		}
+		return filepath.Clean(value)
+	}
+	adoptRepository := func(next *session.Repository) error {
+		if next == nil {
+			return fmt.Errorf("session is nil")
+		}
+		repository = next
+		sessionDir = filepath.Dir(next.Path())
+		runner.Transcript = next.Context()
+		if providerID, modelID, ok := next.Model(); ok && (providerID != cfg.Provider || modelID != cfg.Model) {
+			selected, selectErr := createLoop(providerID, modelID)
+			if selectErr != nil {
+				return selectErr
+			}
+			runner.Loop = selected
+			cfg.Provider, cfg.Model = providerID, modelID
+		}
+		return nil
+	}
+	runner.SessionTree = func() string {
+		if repository == nil {
+			return "Session persistence is disabled."
+		}
+		return repository.Tree()
+	}
+	runner.ListSessions = func() string {
+		if sessionDir == "" {
+			return "Session persistence is disabled."
+		}
+		items, listErr := session.List(sessionDir)
+		if listErr != nil {
+			return "Session list failed: " + listErr.Error()
+		}
+		var b strings.Builder
+		for i, item := range items {
+			name := item.Name
+			if name == "" {
+				name = "(unnamed)"
+			}
+			fmt.Fprintf(&b, "%d. %s  %s  %d messages  %s\n", i+1, item.Path, name, item.Messages, item.Model)
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
+	runner.ExportSession = func(path string) error {
+		if repository == nil {
+			return fmt.Errorf("session persistence is disabled")
+		}
+		return repository.Export(resolveSessionPath(path))
+	}
+	runner.ResumeSession = func(path string) ([]agent.Message, error) {
+		next, openErr := session.Open(resolveSessionPath(path))
+		if openErr != nil {
+			return nil, openErr
+		}
+		if err := adoptRepository(next); err != nil {
+			return nil, err
+		}
+		return runner.Transcript, nil
+	}
+	runner.ImportSession = func(path string) ([]agent.Message, error) {
+		next, openErr := session.Open(resolveSessionPath(path))
+		if openErr != nil {
+			return nil, openErr
+		}
+		if err := adoptRepository(next); err != nil {
+			return nil, err
+		}
+		return runner.Transcript, nil
+	}
+	runner.ForkSession = func(fork bool) ([]agent.Message, error) {
+		if repository == nil {
+			return nil, fmt.Errorf("session persistence is disabled")
+		}
+		next, cloneErr := repository.Clone(sessionDir, fork)
+		if cloneErr != nil {
+			return nil, cloneErr
+		}
+		if err := adoptRepository(next); err != nil {
+			return nil, err
+		}
+		return runner.Transcript, nil
+	}
+	thinkingLevel := ""
+	if repository != nil {
+		thinkingLevel = repository.Thinking()
+	}
+	runner.SetThinking = func(level string) error {
+		switch strings.ToLower(strings.TrimSpace(level)) {
+		case "off", "minimal", "low", "medium", "high":
+		default:
+			return fmt.Errorf("unsupported thinking level %q", level)
+		}
+		thinkingLevel = strings.ToLower(strings.TrimSpace(level))
+		if repository != nil {
+			return repository.AppendThinking(thinkingLevel)
+		}
+		return nil
+	}
+	runner.Compact = func() error {
+		if runner.Loop == nil || runner.Loop.Provider == nil {
+			return fmt.Errorf("no model is configured")
+		}
+		if len(runner.Transcript) < 3 {
+			return fmt.Errorf("conversation is already short")
+		}
+		prompt := agent.Message{Role: "user", Content: "Summarize the conversation so far for a coding agent. Preserve goals, decisions, constraints, files changed, and unresolved work. Return only the concise summary."}
+		input := append([]agent.Message{}, runner.Transcript...)
+		input = append(input, prompt)
+		summaryReply, summaryErr := runner.Loop.Provider.Complete(context.Background(), input, nil)
+		if summaryErr != nil {
+			return summaryErr
+		}
+		summary := strings.TrimSpace(summaryReply.Content)
+		if summary == "" {
+			return fmt.Errorf("provider returned an empty summary")
+		}
+		keep := 6
+		if len(runner.Transcript) < keep {
+			keep = len(runner.Transcript)
+		}
+		runner.Transcript = append([]agent.Message{{Role: "system", Content: "Previous conversation summary:\n" + summary}}, runner.Transcript[len(runner.Transcript)-keep:]...)
+		if repository != nil {
+			return repository.AppendCompaction(summary)
+		}
+		return nil
 	}
 	if err := runner.Run(context.Background()); err != nil {
 		fatal(err.Error())

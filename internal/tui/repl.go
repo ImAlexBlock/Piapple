@@ -14,20 +14,28 @@ import (
 )
 
 type Runner struct {
-	Loop         *agent.Loop
-	In           io.Reader
-	Out          io.Writer
-	Transcript   []agent.Message
-	Persist      func([]agent.Message) error
-	Notice       string
-	Shell        func(context.Context, string) (string, error)
-	Login        func(provider, key string) error
-	Logout       func(provider string) error
-	SelectModel  func(provider, model string) error
-	ModelOptions []models.Model
-	SessionInfo  func() string
-	SetName      func(string) error
-	NewSession   func() error
+	Loop          *agent.Loop
+	In            io.Reader
+	Out           io.Writer
+	Transcript    []agent.Message
+	Persist       func([]agent.Message) error
+	Notice        string
+	Shell         func(context.Context, string) (string, error)
+	Login         func(provider, key string) error
+	Logout        func(provider string) error
+	SelectModel   func(provider, model string) error
+	ModelOptions  []models.Model
+	SessionInfo   func() string
+	SetName       func(string) error
+	NewSession    func() error
+	SessionTree   func() string
+	ExportSession func(string) error
+	ImportSession func(string) ([]agent.Message, error)
+	ResumeSession func(string) ([]agent.Message, error)
+	ListSessions  func() string
+	ForkSession   func(bool) ([]agent.Message, error)
+	SetThinking   func(string) error
+	Compact       func() error
 }
 type resultMsg struct {
 	messages []agent.Message
@@ -280,6 +288,121 @@ func (m *model) submit() tea.Cmd {
 				m.emit("Model selection failed: " + err.Error())
 			} else {
 				m.emit("Selected " + providerID + "/" + modelID)
+			}
+			return nil
+		case "tree":
+			if m.runner.SessionTree == nil {
+				m.emit("Session tree is unavailable.")
+			} else {
+				tree := m.runner.SessionTree()
+				if tree == "" {
+					tree = "(empty session)"
+				}
+				m.emit(tree)
+			}
+			return nil
+		case "export":
+			path := strings.TrimSpace(command.Arguments)
+			if path == "" {
+				m.emit("Usage: /export <path>")
+				return nil
+			}
+			if m.runner.ExportSession == nil {
+				m.emit("Session export is unavailable.")
+				return nil
+			}
+			if err := m.runner.ExportSession(path); err != nil {
+				m.emit("Export failed: " + err.Error())
+			} else {
+				m.emit("Exported session to " + path)
+			}
+			return nil
+		case "import":
+			path := strings.TrimSpace(command.Arguments)
+			if path == "" {
+				m.emit("Usage: /import <path>")
+				return nil
+			}
+			if m.runner.ImportSession == nil {
+				m.emit("Session import is unavailable.")
+				return nil
+			}
+			messages, err := m.runner.ImportSession(path)
+			if err != nil {
+				m.emit("Import failed: " + err.Error())
+			} else {
+				m.runner.Transcript = messages
+				m.emit(fmt.Sprintf("Imported %d messages.", len(messages)))
+			}
+			return nil
+		case "resume":
+			path := strings.TrimSpace(command.Arguments)
+			if path == "" {
+				if m.runner.ListSessions == nil {
+					m.emit("Usage: /resume <session.jsonl>")
+				} else {
+					list := m.runner.ListSessions()
+					if list == "" {
+						list = "No sessions found."
+					}
+					m.emit(list)
+				}
+				return nil
+			}
+			if m.runner.ResumeSession == nil {
+				m.emit("Session resume is unavailable.")
+				return nil
+			}
+			messages, err := m.runner.ResumeSession(path)
+			if err != nil {
+				m.emit("Resume failed: " + err.Error())
+			} else {
+				m.runner.Transcript = messages
+				m.lines = nil
+				m.scroll = 0
+				m.emit(fmt.Sprintf("Resumed %d messages.", len(messages)))
+			}
+			return nil
+		case "fork", "clone":
+			if m.runner.ForkSession == nil {
+				m.emit("Session branching is unavailable.")
+				return nil
+			}
+			messages, err := m.runner.ForkSession(command.Name == "fork")
+			if err != nil {
+				m.emit("Session branch failed: " + err.Error())
+			} else {
+				m.runner.Transcript = messages
+				m.lines = nil
+				m.scroll = 0
+				m.emit(fmt.Sprintf("Created %s session.", command.Name))
+			}
+			return nil
+		case "thinking":
+			level := strings.TrimSpace(command.Arguments)
+			if level == "" {
+				m.emit("Usage: /thinking <off|minimal|low|medium|high>")
+				return nil
+			}
+			if m.runner.SetThinking == nil {
+				m.emit("Thinking level control is unavailable.")
+				return nil
+			}
+			if err := m.runner.SetThinking(level); err != nil {
+				m.emit("Thinking level failed: " + err.Error())
+			} else {
+				m.emit("Thinking level: " + level)
+			}
+			return nil
+		case "compact":
+			if m.runner.Compact == nil {
+				m.emit("Context compaction is unavailable.")
+				return nil
+			}
+			if err := m.runner.Compact(); err != nil {
+				m.emit("Compaction failed: " + err.Error())
+			} else {
+				m.emit("Context compacted.")
 			}
 			return nil
 		case "login":
