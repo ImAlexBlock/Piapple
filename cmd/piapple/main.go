@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
+	"github.com/ImAlexBlock/Piapple/internal/auth"
 	"github.com/ImAlexBlock/Piapple/internal/config"
 	"github.com/ImAlexBlock/Piapple/internal/projectcontext"
 	"github.com/ImAlexBlock/Piapple/internal/provider"
@@ -46,6 +47,17 @@ func main() {
 	cfg.SystemPrompt += projectcontext.Format(contextFiles)
 	if cfg.APIKey == "" {
 		cfg.APIKey = config.APIKeyFromEnvironment(cfg.Provider)
+	}
+	if cfg.APIKey == "" && cfg.Provider != "" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			fatal(homeErr.Error())
+		}
+		credentials, loadErr := auth.Load(auth.Path(home))
+		if loadErr != nil {
+			fatal(loadErr.Error())
+		}
+		cfg.APIKey = credentials.Get(cfg.Provider)
 	}
 	if cfg.SessionPath != "" && !filepath.IsAbs(cfg.SessionPath) {
 		cfg.SessionPath = filepath.Join(cfg.Workdir, cfg.SessionPath)
