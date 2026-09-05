@@ -51,3 +51,28 @@ func TestLoopRejectsInvalidArguments(t *testing.T) {
 		t.Fatal(messages[1].Content)
 	}
 }
+
+type fakeStreamingProvider struct{}
+
+func (fakeStreamingProvider) Complete(context.Context, []agent.Message, []agent.ToolDefinition) (agent.Message, error) {
+	return agent.Message{}, nil
+}
+func (fakeStreamingProvider) Stream(context.Context, []agent.Message, []agent.ToolDefinition) (<-chan agent.StreamEvent, error) {
+	ch := make(chan agent.StreamEvent, 2)
+	ch <- agent.StreamEvent{Type: "delta", Delta: "hi"}
+	ch <- agent.StreamEvent{Type: "done", Message: &agent.Message{Role: "assistant", Content: "hi"}}
+	close(ch)
+	return ch, nil
+}
+func TestLoopConsumesStreamingProvider(t *testing.T) {
+	var delta string
+	loop := agent.NewLoop(fakeStreamingProvider{}, nil, 1, func(event agent.Event) {
+		if event.Type == "model_delta" {
+			delta += event.Detail
+		}
+	})
+	_, answer, err := loop.Run(context.Background(), []agent.Message{{Role: "user", Content: "hello"}})
+	if err != nil || answer != "hi" || delta != "hi" {
+		t.Fatalf("answer=%q delta=%q err=%v", answer, delta, err)
+	}
+}

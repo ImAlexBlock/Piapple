@@ -34,6 +34,7 @@ type resultMsg struct {
 	answer   string
 	err      error
 }
+type eventMsg struct{ event agent.Event }
 type model struct {
 	runner        *Runner
 	ctx           context.Context
@@ -45,6 +46,7 @@ type model struct {
 	cancel        context.CancelFunc
 	scroll        int
 	follow        bool
+	streaming     string
 	picker        bool
 	pickerIndex   int
 	width, height int
@@ -72,7 +74,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.Notice != "" {
 		initialLines = append(initialLines, r.Notice)
 	}
-	_, err := tea.NewProgram(&model{runner: r, ctx: ctx, historyPos: -1, follow: true, lines: initialLines}, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+	m := &model{runner: r, ctx: ctx, historyPos: -1, follow: true, lines: initialLines}
+	program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	previousSink := r.Loop.OnEvent
+	r.Loop.OnEvent = func(event agent.Event) {
+		if previousSink != nil {
+			previousSink(event)
+		}
+		program.Send(eventMsg{event: event})
+	}
+	defer func() { r.Loop.OnEvent = previousSink }()
+	_, err := program.Run()
 	return err
 }
 func (m *model) Init() tea.Cmd { return nil }
@@ -109,6 +121,9 @@ func (m *model) allContentLines() []string {
 	var out []string
 	for _, line := range m.lines {
 		out = append(out, strings.Split(line, "\n")...)
+	}
+	if m.streaming != "" {
+		out = append(out, wrap(userStyle.Render(m.streaming), m.contentWidth()))
 	}
 	if m.busy {
 		out = append(out, toolStyle.Render("● working..."))
@@ -373,7 +388,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = v.Width, v.Height
+	case eventMsg:
+		if v.event.Type == "model_delta" {
+			m.streaming += v.event.Detail
+			m.follow = true
+		} else if v.event.Type == "tool_start" {
+			m.emit(toolStyle.Render("▶ ") + v.event.Detail)
+		} else if v.event.Type == "tool_end" {
+			m.emit(toolStyle.Render("✓ ") + v.event.Detail)
+		}
 	case resultMsg:
+		m.streaming = ""
 		m.busy = false
 		m.cancel = nil
 		m.runner.Transcript = v.messages

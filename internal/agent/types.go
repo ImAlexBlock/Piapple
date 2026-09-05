@@ -30,5 +30,19 @@ type Provider interface {
 	Complete(context.Context, []Message, []ToolDefinition) (Message, error)
 }
 
+// StreamEvent is the provider-neutral incremental response protocol. Delta
+// events are emitted as text arrives; done contains the complete assistant
+// message, including any accumulated tool calls.
+type StreamEvent struct {
+	Type    string // delta, done, error
+	Delta   string
+	Message *Message
+	Err     error
+}
+
+type StreamingProvider interface {
+	Stream(context.Context, []Message, []ToolDefinition) (<-chan StreamEvent, error)
+}
+
 type Event struct{ Type, Detail string }
 type EventSink func(Event)
