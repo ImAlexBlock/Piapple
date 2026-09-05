@@ -33,6 +33,10 @@ func main() {
 	flag.BoolVar(continueSession, "c", false, "continue the most recent project session")
 	noSession := flag.Bool("no-session", false, "do not persist session history")
 	flag.Parse()
+	// Keep raw CLI overrides separate from resolved settings so switching models
+	// later does not accidentally reuse an API key or endpoint for another provider.
+	cliAPIKey := cfg.APIKey
+	cliBaseURL := cfg.BaseURL
 	var err error
 	cfg.Workdir, err = filepath.Abs(cfg.Workdir)
 	if err != nil {
@@ -98,8 +102,36 @@ func main() {
 			fatal(fmt.Sprintf("session: %v", err))
 		}
 	}
+	// A resumed Pi session records its active model in the session tree. It has
+	// higher precedence than settings, but an explicit CLI model still wins.
+	if cliModel == nil && repository != nil {
+		if providerID, modelID, ok := repository.Model(); ok {
+			cfg.Provider, cfg.Model = providerID, modelID
+			if cliBaseURL == "" {
+				cfg.BaseURL = config.DefaultBaseURL(providerID)
+			}
+			cfg.APIKey = cliAPIKey
+			if cfg.APIKey == "" {
+				cfg.APIKey = config.APIKeyFromEnvironment(providerID)
+			}
+			if cfg.APIKey == "" {
+				credentials, loadErr := auth.Load(auth.Path(home))
+				if loadErr != nil {
+					fatal(loadErr.Error())
+				}
+				cfg.APIKey = credentials.Get(providerID)
+			}
+		}
+	}
+	initialProvider := cfg.Provider
 	createLoop := func(providerID, modelID string) (*agent.Loop, error) {
-		key := config.APIKeyFromEnvironment(providerID)
+		key := ""
+		if providerID == initialProvider {
+			key = cliAPIKey
+		}
+		if key == "" {
+			key = config.APIKeyFromEnvironment(providerID)
+		}
 		if key == "" {
 			home, homeErr := os.UserHomeDir()
 			if homeErr != nil {
@@ -114,7 +146,11 @@ func main() {
 		if key == "" {
 			return nil, fmt.Errorf("no API key found for %s; use /login %s <api-key>", providerID, providerID)
 		}
-		p, createErr := provider.New(providerID, provider.Config{Model: modelID, BaseURL: config.DefaultBaseURL(providerID), APIKey: key, SystemPrompt: cfg.SystemPrompt})
+		baseURL := config.DefaultBaseURL(providerID)
+		if providerID == initialProvider && cliBaseURL != "" {
+			baseURL = cliBaseURL
+		}
+		p, createErr := provider.New(providerID, provider.Config{Model: modelID, BaseURL: baseURL, APIKey: key, SystemPrompt: cfg.SystemPrompt})
 		if createErr != nil {
 			return nil, createErr
 		}
@@ -195,6 +231,11 @@ func main() {
 		}
 		runner.Loop = selected
 		cfg.Provider, cfg.Model = providerID, modelID
+		if repository != nil {
+			if appendErr := repository.AppendModelChange(providerID, modelID); appendErr != nil {
+				return appendErr
+			}
+		}
 		projectSettings, loadErr := settings.Load(settings.ProjectPath(cfg.Workdir))
 		if loadErr != nil {
 			return loadErr

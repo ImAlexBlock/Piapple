@@ -38,3 +38,36 @@ func TestContinueUsesMostRecentlyModifiedSession(t *testing.T) {
 	}
 	_ = first
 }
+
+func TestRepositoryPersistsAndRestoresModelChange(t *testing.T) {
+	r, err := Create(t.TempDir(), "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AppendModelChange("anthropic", "claude-sonnet"); err != nil {
+		t.Fatal(err)
+	}
+	if provider, model, ok := r.Model(); !ok || provider != "anthropic" || model != "claude-sonnet" {
+		t.Fatalf("model=%q/%q ok=%v", provider, model, ok)
+	}
+	loaded, err := Open(r.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider, model, ok := loaded.Model(); !ok || provider != "anthropic" || model != "claude-sonnet" {
+		t.Fatalf("loaded model=%q/%q ok=%v", provider, model, ok)
+	}
+}
+
+func TestRepositoryModelReturnsLatestChange(t *testing.T) {
+	r, err := Create(t.TempDir(), "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.AppendModelChange("openai", "gpt-old")
+	_ = r.AppendModelChange("openai", "gpt-new")
+	provider, model, ok := r.Model()
+	if !ok || provider != "openai" || model != "gpt-new" {
+		t.Fatalf("model=%q/%q ok=%v", provider, model, ok)
+	}
+}
