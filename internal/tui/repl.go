@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
+	"github.com/ImAlexBlock/Piapple/internal/commands"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -149,16 +150,30 @@ func (m *model) submit() tea.Cmd {
 	m.input = ""
 	m.history = append(m.history, text)
 	m.historyPos = -1
+	if command, ok := commands.Parse(text); ok {
+		switch command.Name {
+		case "help":
+			m.emit(commands.Help())
+			return nil
+		case "clear":
+			m.lines = nil
+			m.runner.Transcript = nil
+			m.scroll = 0
+			return nil
+		case "quit":
+			return tea.Quit
+		default:
+			m.emit("/" + command.Name + " is recognized but has not been migrated yet.")
+			return nil
+		}
+	}
 	switch text {
-	case "/help":
-		m.emit("/help  /clear  /exit\nEnter sends a prompt. Alt+Enter inserts a newline.\nPiapple does not choose a model automatically; configure one with -model.")
-		return nil
 	case "/clear":
 		m.lines = nil
 		m.runner.Transcript = nil
 		m.scroll = 0
 		return nil
-	case "/exit", "/quit":
+	case "/exit":
 		return tea.Quit
 	}
 	if m.runner.Loop == nil || m.runner.Loop.Provider == nil {
