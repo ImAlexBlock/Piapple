@@ -25,7 +25,10 @@ func main() {
 	flag.StringVar(&cfg.SystemPrompt, "system", "You are Piapple, a concise expert coding assistant. Inspect before editing and explain completed work.", "system prompt")
 	flag.IntVar(&cfg.MaxSteps, "max-steps", 12, "maximum model/tool rounds")
 	flag.StringVar(&cfg.Workdir, "C", ".", "working directory")
-	flag.StringVar(&cfg.SessionPath, "session", "", "JSONL session path")
+	flag.StringVar(&cfg.SessionPath, "session", "", "session JSONL file")
+	continueSession := flag.Bool("continue", false, "continue the most recent project session")
+	flag.BoolVar(continueSession, "c", false, "continue the most recent project session")
+	noSession := flag.Bool("no-session", false, "do not persist session history")
 	flag.Parse()
 	var err error
 	cfg.Workdir, err = filepath.Abs(cfg.Workdir)
@@ -41,6 +44,26 @@ func main() {
 	if cfg.SessionPath != "" && !filepath.IsAbs(cfg.SessionPath) {
 		cfg.SessionPath = filepath.Join(cfg.Workdir, cfg.SessionPath)
 	}
+	var repository *session.Repository
+	if !*noSession {
+		if cfg.SessionPath != "" {
+			repository, err = session.Open(cfg.SessionPath)
+		} else {
+			home, homeErr := os.UserHomeDir()
+			if homeErr != nil {
+				fatal(homeErr.Error())
+			}
+			dir := session.DefaultDirectory(home, cfg.Workdir)
+			if *continueSession {
+				repository, err = session.Continue(dir)
+			} else {
+				repository, err = session.Create(dir, cfg.Workdir)
+			}
+		}
+		if err != nil {
+			fatal(fmt.Sprintf("session: %v", err))
+		}
+	}
 	var p agent.Provider
 	if cfg.Model != "" && cfg.APIKey != "" {
 		p, err = provider.New(cfg.Provider, provider.Config{Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, SystemPrompt: cfg.SystemPrompt})
@@ -54,9 +77,20 @@ func main() {
 			fmt.Fprintln(os.Stderr, "[tool]", e.Detail)
 		}
 	})
-	transcript, err := session.Load(cfg.SessionPath)
-	if err != nil {
-		fatal(err.Error())
+	transcript := []agent.Message{}
+	if repository != nil {
+		transcript = repository.Context()
+	}
+	persist := func(messages []agent.Message) error {
+		if repository == nil {
+			return nil
+		}
+		for _, message := range messages {
+			if err := repository.AppendMessage(message); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	prompt := strings.TrimSpace(strings.Join(flag.Args(), " "))
 	if prompt != "" {
@@ -66,7 +100,7 @@ func main() {
 		before := len(transcript)
 		transcript = append(transcript, agent.Message{Role: "user", Content: prompt})
 		updated, answer, err := loop.Run(context.Background(), transcript)
-		if appendErr := session.Append(cfg.SessionPath, updated[before:]); appendErr != nil {
+		if appendErr := persist(updated[before:]); appendErr != nil {
 			fatal(appendErr.Error())
 		}
 		if err != nil {
@@ -76,7 +110,7 @@ func main() {
 		return
 	}
 	notice := startupNotice(cfg)
-	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: func(messages []agent.Message) error { return session.Append(cfg.SessionPath, messages) }}
+	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist}
 	if err := runner.Run(context.Background()); err != nil {
 		fatal(err.Error())
 	}
