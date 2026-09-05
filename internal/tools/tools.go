@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
@@ -19,7 +22,7 @@ const maxLines = 2000
 type Builtins struct{ Workdir string }
 
 func (b Builtins) All() []agent.Tool {
-	return []agent.Tool{fileTool{b.Workdir, "read"}, fileTool{b.Workdir, "write"}, fileTool{b.Workdir, "edit"}, fileTool{b.Workdir, "bash"}}
+	return []agent.Tool{fileTool{b.Workdir, "read"}, fileTool{b.Workdir, "write"}, fileTool{b.Workdir, "edit"}, fileTool{b.Workdir, "bash"}, fileTool{b.Workdir, "grep"}, fileTool{b.Workdir, "find"}, fileTool{b.Workdir, "ls"}}
 }
 
 type fileTool struct{ workdir, name string }
@@ -32,6 +35,12 @@ func (t fileTool) Definition() agent.ToolDefinition {
 		return def("write", "Create or overwrite a file.", map[string]any{"path": str(), "content": str()})
 	case "edit":
 		return def("edit", "Make exact text replacements in a file. oldText must match exactly.", map[string]any{"path": str(), "edits": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"oldText": str(), "newText": str()}, "required": []string{"oldText", "newText"}}}})
+	case "grep":
+		return def("grep", "Search file contents using a regular expression.", map[string]any{"pattern": str(), "path": str(), "limit": map[string]any{"type": "integer"}})
+	case "find":
+		return def("find", "Find files by glob pattern.", map[string]any{"pattern": str(), "path": str(), "limit": map[string]any{"type": "integer"}})
+	case "ls":
+		return def("ls", "List directory contents.", map[string]any{"path": str(), "limit": map[string]any{"type": "integer"}})
 	default:
 		return def("bash", "Execute a shell command in the working directory.", map[string]any{"command": str(), "timeout": map[string]any{"type": "integer", "description": "seconds"}})
 	}
@@ -52,6 +61,12 @@ func (t fileTool) Execute(ctx context.Context, raw string) (string, error) {
 		return t.write(args)
 	case "edit":
 		return t.edit(args)
+	case "grep":
+		return t.grep(args)
+	case "find":
+		return t.find(args)
+	case "ls":
+		return t.ls(args)
 	default:
 		return t.bash(ctx, args)
 	}
@@ -185,4 +200,122 @@ func (t fileTool) bash(ctx context.Context, args map[string]json.RawMessage) (st
 		return "", err
 	}
 	return RunShell(ctx, t.workdir, command)
+}
+
+func optionalPath(args map[string]json.RawMessage, workdir string) string {
+	p, err := arg(args, "path")
+	if err != nil || p == "" {
+		return workdir
+	}
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
+	}
+	return filepath.Join(workdir, p)
+}
+func limit(args map[string]json.RawMessage, fallback int) int {
+	value := fallback
+	_ = json.Unmarshal(args["limit"], &value)
+	if value < 1 {
+		return fallback
+	}
+	return value
+}
+func (t fileTool) ls(args map[string]json.RawMessage) (string, error) {
+	entries, err := os.ReadDir(optionalPath(args, t.workdir))
+	if err != nil {
+		return "", err
+	}
+	max := limit(args, 500)
+	out := []string{}
+	for _, entry := range entries {
+		suffix := ""
+		if entry.IsDir() {
+			suffix = "/"
+		}
+		out = append(out, entry.Name()+suffix)
+		if len(out) >= max {
+			break
+		}
+	}
+	sort.Strings(out)
+	return limited(strings.Join(out, "\n")), nil
+}
+func (t fileTool) find(args map[string]json.RawMessage) (string, error) {
+	pattern, err := arg(args, "pattern")
+	if err != nil {
+		return "", err
+	}
+	root := optionalPath(args, t.workdir)
+	max := limit(args, 1000)
+	out := []string{}
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			return nil
+		}
+		relative, _ := filepath.Rel(root, path)
+		matched, _ := filepath.Match(pattern, filepath.Base(path))
+		if !matched {
+			matched, _ = filepath.Match(pattern, filepath.ToSlash(relative))
+		}
+		if matched {
+			out = append(out, filepath.ToSlash(relative))
+			if len(out) >= max {
+				return fs.SkipAll
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(out)
+	return limited(strings.Join(out, "\n")), nil
+}
+func (t fileTool) grep(args map[string]json.RawMessage) (string, error) {
+	pattern, err := arg(args, "pattern")
+	if err != nil {
+		return "", err
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return "", err
+	}
+	root := optionalPath(args, t.workdir)
+	max := limit(args, 100)
+	out := []string{}
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		relative, _ := filepath.Rel(root, path)
+		for lineNo, line := range strings.Split(string(data), "\n") {
+			if re.MatchString(line) {
+				out = append(out, fmt.Sprintf("%s:%d:%s", filepath.ToSlash(relative), lineNo+1, line))
+				if len(out) >= max {
+					return fs.SkipAll
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return limited(strings.Join(out, "\n")), nil
 }

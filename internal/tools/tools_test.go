@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,5 +44,25 @@ func TestWriteThenReadUsesWorkdir(t *testing.T) {
 	got, err := read.Execute(context.Background(), `{"path":"nested/a.txt"}`)
 	if err != nil || got != "hello" {
 		t.Fatalf("got=%q err=%v", got, err)
+	}
+}
+
+func TestReadOnlyDiscoveryTools(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\nfunc Demo() {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "nested"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "nested", "b.txt"), []byte("needle"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, raw, want string }{{"ls", `{}`, "a.go"}, {"find", `{"pattern":"*.txt"}`, "nested/b.txt"}, {"grep", `{"pattern":"needle"}`, "nested/b.txt:1:needle"}} {
+		tool := fileTool{workdir: dir, name: test.name}
+		got, err := tool.Execute(context.Background(), test.raw)
+		if err != nil || !strings.Contains(got, test.want) {
+			t.Fatalf("%s: got=%q err=%v", test.name, got, err)
+		}
 	}
 }
