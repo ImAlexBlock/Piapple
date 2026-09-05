@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +35,9 @@ func main() {
 	continueSession := flag.Bool("continue", false, "continue the most recent project session")
 	flag.BoolVar(continueSession, "c", false, "continue the most recent project session")
 	noSession := flag.Bool("no-session", false, "do not persist session history")
+	printMode := flag.Bool("p", false, "print the answer without starting the TUI")
+	flag.BoolVar(printMode, "print", false, "print the answer without starting the TUI")
+	jsonMode := flag.Bool("json", false, "print the final answer as JSON")
 	flag.Parse()
 	// Keep raw CLI overrides separate from resolved settings so switching models
 	// later does not accidentally reuse an API key or endpoint for another provider.
@@ -189,7 +194,18 @@ func main() {
 		return nil
 	}
 	prompt := strings.TrimSpace(strings.Join(flag.Args(), " "))
-	if prompt != "" {
+	// Match Pi's non-interactive behavior: a prompt supplied on the command
+	// line, -p/--print, or stdin redirected from a pipe uses print mode.
+	stdinInfo, _ := os.Stdin.Stat()
+	nonInteractive := stdinInfo != nil && stdinInfo.Mode()&os.ModeCharDevice == 0
+	if prompt == "" && nonInteractive {
+		data, readErr := io.ReadAll(os.Stdin)
+		if readErr != nil {
+			fatal(readErr.Error())
+		}
+		prompt = strings.TrimSpace(string(data))
+	}
+	if prompt != "" && (*printMode || nonInteractive || len(flag.Args()) > 0) {
 		if loop.Provider == nil {
 			fatal(startupConfigurationError(cfg))
 		}
@@ -202,7 +218,15 @@ func main() {
 		if err != nil {
 			fatal(err.Error())
 		}
-		fmt.Println(answer)
+		if *jsonMode {
+			payload, marshalErr := json.Marshal(map[string]any{"type": "result", "answer": answer, "model": cfg.Provider + "/" + cfg.Model})
+			if marshalErr != nil {
+				fatal(marshalErr.Error())
+			}
+			fmt.Println(string(payload))
+		} else {
+			fmt.Println(answer)
+		}
 		return
 	}
 	notice := startupNotice(cfg)
