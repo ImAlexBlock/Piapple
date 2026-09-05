@@ -14,6 +14,7 @@ import (
 	"github.com/ImAlexBlock/Piapple/internal/projectcontext"
 	"github.com/ImAlexBlock/Piapple/internal/provider"
 	"github.com/ImAlexBlock/Piapple/internal/session"
+	"github.com/ImAlexBlock/Piapple/internal/settings"
 	"github.com/ImAlexBlock/Piapple/internal/tools"
 	"github.com/ImAlexBlock/Piapple/internal/tui"
 )
@@ -82,19 +83,44 @@ func main() {
 			fatal(fmt.Sprintf("session: %v", err))
 		}
 	}
-	var p agent.Provider
-	if cfg.Model != "" && cfg.APIKey != "" {
-		p, err = provider.New(cfg.Provider, provider.Config{Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, SystemPrompt: cfg.SystemPrompt})
+	createLoop := func(providerID, modelID string) (*agent.Loop, error) {
+		key := config.APIKeyFromEnvironment(providerID)
+		if key == "" {
+			home, homeErr := os.UserHomeDir()
+			if homeErr != nil {
+				return nil, homeErr
+			}
+			credentials, loadErr := auth.Load(auth.Path(home))
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			key = credentials.Get(providerID)
+		}
+		if key == "" {
+			return nil, fmt.Errorf("no API key found for %s; use /login %s <api-key>", providerID, providerID)
+		}
+		p, createErr := provider.New(providerID, provider.Config{Model: modelID, BaseURL: config.DefaultBaseURL(providerID), APIKey: key, SystemPrompt: cfg.SystemPrompt})
+		if createErr != nil {
+			return nil, createErr
+		}
+		builtins := tools.Builtins{Workdir: cfg.Workdir}
+		return agent.NewLoop(p, builtins.All(), cfg.MaxSteps, func(e agent.Event) {
+			if e.Type == "tool_start" {
+				fmt.Fprintln(os.Stderr, "[tool]", e.Detail)
+			}
+		}), nil
+	}
+	var loop *agent.Loop
+	if cfg.Provider != "" && cfg.Model != "" {
+		loop, err = createLoop(cfg.Provider, cfg.Model)
 		if err != nil {
 			fatal(err.Error())
 		}
 	}
-	builtins := tools.Builtins{Workdir: cfg.Workdir}
-	loop := agent.NewLoop(p, builtins.All(), cfg.MaxSteps, func(e agent.Event) {
-		if e.Type == "tool_start" {
-			fmt.Fprintln(os.Stderr, "[tool]", e.Detail)
-		}
-	})
+	if loop == nil {
+		builtins := tools.Builtins{Workdir: cfg.Workdir}
+		loop = agent.NewLoop(nil, builtins.All(), cfg.MaxSteps, nil)
+	}
 	transcript := []agent.Message{}
 	if repository != nil {
 		transcript = repository.Context()
@@ -112,7 +138,7 @@ func main() {
 	}
 	prompt := strings.TrimSpace(strings.Join(flag.Args(), " "))
 	if prompt != "" {
-		if p == nil {
+		if loop.Provider == nil {
 			fatal(startupConfigurationError(cfg))
 		}
 		before := len(transcript)
@@ -150,6 +176,21 @@ func main() {
 		credentials.Delete(provider)
 		return auth.Save(authPath, credentials)
 	}}
+
+	runner.SelectModel = func(providerID, modelID string) error {
+		selected, selectErr := createLoop(providerID, modelID)
+		if selectErr != nil {
+			return selectErr
+		}
+		runner.Loop = selected
+		cfg.Provider, cfg.Model = providerID, modelID
+		projectSettings, loadErr := settings.Load(settings.ProjectPath(cfg.Workdir))
+		if loadErr != nil {
+			return loadErr
+		}
+		projectSettings.DefaultModel = &settings.ModelRef{Provider: providerID, ID: modelID}
+		return settings.Save(settings.ProjectPath(cfg.Workdir), projectSettings)
+	}
 	if err := runner.Run(context.Background()); err != nil {
 		fatal(err.Error())
 	}

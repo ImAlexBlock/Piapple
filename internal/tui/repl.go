@@ -13,15 +13,16 @@ import (
 )
 
 type Runner struct {
-	Loop       *agent.Loop
-	In         io.Reader
-	Out        io.Writer
-	Transcript []agent.Message
-	Persist    func([]agent.Message) error
-	Notice     string
-	Shell      func(context.Context, string) (string, error)
-	Login      func(provider, key string) error
-	Logout     func(provider string) error
+	Loop        *agent.Loop
+	In          io.Reader
+	Out         io.Writer
+	Transcript  []agent.Message
+	Persist     func([]agent.Message) error
+	Notice      string
+	Shell       func(context.Context, string) (string, error)
+	Login       func(provider, key string) error
+	Logout      func(provider string) error
+	SelectModel func(provider, model string) error
 }
 type resultMsg struct {
 	messages []agent.Message
@@ -189,6 +190,22 @@ func (m *model) submit() tea.Cmd {
 			return nil
 		case "quit":
 			return tea.Quit
+		case "model":
+			parts := strings.SplitN(strings.TrimSpace(command.Arguments), "/", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				m.emit("Usage: /model <provider/model>")
+				return nil
+			}
+			if m.runner.SelectModel == nil {
+				m.emit("Model selection is unavailable.")
+				return nil
+			}
+			if err := m.runner.SelectModel(parts[0], parts[1]); err != nil {
+				m.emit("Model selection failed: " + err.Error())
+			} else {
+				m.emit("Selected " + parts[0] + "/" + parts[1])
+			}
+			return nil
 		case "login":
 			parts := strings.Fields(command.Arguments)
 			if len(parts) != 2 {
