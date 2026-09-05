@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,12 +18,10 @@ type Runner struct {
 	Transcript []agent.Message
 	Persist    func([]agent.Message) error
 }
-
 type resultMsg struct {
-	messages  []agent.Message
-	answer    string
-	err       error
-	persisted []agent.Message
+	messages []agent.Message
+	answer   string
+	err      error
 }
 type model struct {
 	runner        *Runner
@@ -35,8 +32,9 @@ type model struct {
 	historyPos    int
 	busy          bool
 	cancel        context.CancelFunc
+	scroll        int
+	follow        bool
 	width, height int
-	mu            sync.Mutex
 }
 
 var (
@@ -50,12 +48,56 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.Loop == nil {
 		return fmt.Errorf("tui: nil agent loop")
 	}
-	p := tea.NewProgram(&model{runner: r, ctx: ctx, historyPos: -1}, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	_, err := p.Run()
+	_, err := tea.NewProgram(&model{runner: r, ctx: ctx, historyPos: -1, follow: true}, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	return err
 }
-func (m *model) Init() tea.Cmd    { return nil }
-func (m *model) emit(line string) { m.lines = append(m.lines, line) }
+func (m *model) Init() tea.Cmd { return nil }
+func (m *model) emit(line string) {
+	m.lines = append(m.lines, wrap(line, m.contentWidth()))
+	m.follow = true
+}
+func (m *model) contentWidth() int {
+	if m.width < 40 {
+		return 76
+	}
+	return m.width - 4
+}
+func wrap(text string, width int) string {
+	if width < 1 {
+		return text
+	}
+	var out []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		if paragraph == "" {
+			out = append(out, "")
+			continue
+		}
+		for len([]rune(paragraph)) > width {
+			r := []rune(paragraph)
+			out = append(out, string(r[:width]))
+			paragraph = string(r[width:])
+		}
+		out = append(out, paragraph)
+	}
+	return strings.Join(out, "\n")
+}
+func (m *model) allContentLines() []string {
+	var out []string
+	for _, line := range m.lines {
+		out = append(out, strings.Split(line, "\n")...)
+	}
+	if m.busy {
+		out = append(out, toolStyle.Render("● working..."))
+	}
+	return out
+}
+func (m *model) composerLines() []string {
+	input := m.input
+	if input == "" {
+		input = ""
+	}
+	return append([]string{userStyle.Render("piapple> ") + input + "▌"}, dimStyle.Render("Enter send • Alt+Enter newline • Ctrl+C cancel/exit • PgUp/PgDown scroll"))
+}
 func (m *model) submit() tea.Cmd {
 	text := strings.TrimSpace(m.input)
 	if text == "" || m.busy {
@@ -66,11 +108,12 @@ func (m *model) submit() tea.Cmd {
 	m.historyPos = -1
 	switch text {
 	case "/help":
-		m.emit(dimStyle.Render("/help  /clear  /model  /exit\nEnter sends a prompt. Ctrl+C cancels/exits."))
+		m.emit("/help  /clear  /exit\nEnter sends a prompt. Alt+Enter inserts a newline.")
 		return nil
 	case "/clear":
 		m.lines = nil
 		m.runner.Transcript = nil
+		m.scroll = 0
 		return nil
 	case "/exit", "/quit":
 		return tea.Quit
@@ -84,11 +127,10 @@ func (m *model) submit() tea.Cmd {
 	return func() tea.Msg {
 		defer cancel()
 		next, answer, err := m.runner.Loop.Run(requestCtx, m.runner.Transcript)
-		persisted := next[before:]
 		if err == nil && m.runner.Persist != nil {
-			err = m.runner.Persist(persisted)
+			err = m.runner.Persist(next[before:])
 		}
-		return resultMsg{messages: next, answer: answer, err: err, persisted: persisted}
+		return resultMsg{messages: next, answer: answer, err: err}
 	}
 }
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -104,6 +146,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.emit(v.answer)
 		}
+	case tea.MouseMsg:
+		if v.Button == tea.MouseButtonWheelUp {
+			m.follow = false
+			m.scroll++
+		}
+		if v.Button == tea.MouseButtonWheelDown {
+			m.scroll--
+			if m.scroll <= 0 {
+				m.scroll = 0
+				m.follow = true
+			}
+		}
 	case tea.KeyMsg:
 		switch v.String() {
 		case "ctrl+c":
@@ -111,15 +165,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cancel != nil {
 					m.cancel()
 				}
-				m.emit(dimStyle.Render("cancel requested"))
+				m.emit("cancel requested")
 				return m, nil
 			}
 			return m, tea.Quit
 		case "enter":
 			return m, m.submit()
+		case "alt+enter", "ctrl+j":
+			m.input += "\n"
 		case "backspace":
 			if len(m.input) > 0 {
-				m.input = m.input[:len(m.input)-1]
+				r := []rune(m.input)
+				m.input = string(r[:len(r)-1])
 			}
 		case "up":
 			if len(m.history) > 0 {
@@ -139,15 +196,37 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyPos = -1
 				m.input = ""
 			}
+		case "pgup", "ctrl+u":
+			m.follow = false
+			m.scroll += m.viewportRows() / 2
+		case "pgdown", "ctrl+d":
+			m.scroll -= m.viewportRows() / 2
+			if m.scroll <= 0 {
+				m.scroll = 0
+				m.follow = true
+			}
+		case "home":
+			m.follow = false
+			m.scroll = len(m.allContentLines())
+		case "end":
+			m.scroll = 0
+			m.follow = true
 		case "ctrl+l":
 			m.lines = nil
 		default:
-			if len(v.Runes) > 0 && v.Type == tea.KeyRunes {
+			if v.Type == tea.KeyRunes {
 				m.input += string(v.Runes)
 			}
 		}
 	}
 	return m, nil
+}
+func (m *model) viewportRows() int {
+	h := m.height
+	if h < 8 {
+		h = 24
+	}
+	return h - 5
 }
 func (m *model) View() string {
 	width := m.width
@@ -158,32 +237,45 @@ func (m *model) View() string {
 	if height < 8 {
 		height = 24
 	}
+	content := m.allContentLines()
+	rows := m.viewportRows()
+	maxScroll := len(content) - rows
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.follow {
+		m.scroll = 0
+	}
+	if m.scroll > maxScroll {
+		m.scroll = maxScroll
+	}
+	start := maxScroll - m.scroll
+	if start < 0 {
+		start = 0
+	}
+	end := start + rows
+	if end > len(content) {
+		end = len(content)
+	}
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Piapple"))
 	b.WriteString("  ")
 	b.WriteString(dimStyle.Render("coding agent"))
-	b.WriteString("\n\n")
-	available := height - 5
-	start := 0
-	if len(m.lines) > available {
-		start = len(m.lines) - available
-	}
-	for _, line := range m.lines[start:] {
+	b.WriteByte('\n')
+	b.WriteString(strings.Repeat("─", width))
+	b.WriteByte('\n')
+	for _, line := range content[start:end] {
 		b.WriteString(line)
 		b.WriteByte('\n')
 	}
-	if m.busy {
-		b.WriteString(toolStyle.Render("● working..."))
+	for i := end - start; i < rows; i++ {
 		b.WriteByte('\n')
 	}
-	b.WriteString("\n")
-	prompt := "piapple> "
-	if m.busy {
-		prompt = "        "
+	b.WriteString(strings.Repeat("─", width))
+	b.WriteByte('\n')
+	for _, line := range m.composerLines() {
+		b.WriteString(line)
+		b.WriteByte('\n')
 	}
-	b.WriteString(userStyle.Render(prompt))
-	b.WriteString(m.input)
-	b.WriteString("▌\n")
-	b.WriteString(dimStyle.Render("Ctrl+C cancel/exit • /help commands"))
-	return lipgloss.NewStyle().Width(width).Render(b.String())
+	return lipgloss.NewStyle().Width(width).Height(height).Render(b.String())
 }
