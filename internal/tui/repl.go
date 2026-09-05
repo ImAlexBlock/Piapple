@@ -27,6 +27,7 @@ type Runner struct {
 	ModelOptions []models.Model
 	SessionInfo  func() string
 	SetName      func(string) error
+	NewSession   func() error
 }
 type resultMsg struct {
 	messages []agent.Message
@@ -280,6 +281,20 @@ func (m *model) submit() tea.Cmd {
 				m.emit("Login failed: " + err.Error())
 			} else {
 				m.emit("Saved API key for " + parts[0] + ". Use /model or restart with -provider " + parts[0] + " -model <model-id>.")
+			}
+			return nil
+		case "new":
+			if m.runner.NewSession == nil {
+				m.emit("Creating a new session is unavailable.")
+				return nil
+			}
+			if err := m.runner.NewSession(); err != nil {
+				m.emit("New session failed: " + err.Error())
+			} else {
+				m.runner.Transcript = nil
+				m.lines = nil
+				m.scroll = 0
+				m.emit("Started a new session.")
 			}
 			return nil
 		case "session":

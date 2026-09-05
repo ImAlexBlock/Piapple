@@ -61,3 +61,16 @@ func TestModelCommandOpensAndAppliesPicker(t *testing.T) {
 		t.Fatalf("selected=%q picker=%v", selected, m.picker)
 	}
 }
+
+func TestNewCommandResetsTranscript(t *testing.T) {
+	called := false
+	r := &Runner{Loop: &agent.Loop{}, Transcript: []agent.Message{{Role: "user", Content: "old"}}, NewSession: func() error { called = true; return nil }}
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, runner: r, lines: []string{"old output"}}
+	m.input = "/new"
+	if cmd := m.submit(); cmd != nil {
+		t.Fatal("new command should not run asynchronously")
+	}
+	if !called || len(m.runner.Transcript) != 0 || len(m.lines) != 1 || !strings.Contains(m.lines[0], "Started") {
+		t.Fatalf("called=%v transcript=%v lines=%v", called, m.runner.Transcript, m.lines)
+	}
+}

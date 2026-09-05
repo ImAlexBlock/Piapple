@@ -93,15 +93,16 @@ func main() {
 		cfg.SessionPath = filepath.Join(cfg.Workdir, cfg.SessionPath)
 	}
 	var repository *session.Repository
+	var sessionDir string
 	if !*noSession {
 		if cfg.SessionPath != "" {
 			repository, err = session.Open(cfg.SessionPath)
 		} else {
-			dir := session.DefaultDirectory(home, cfg.Workdir)
+			sessionDir = session.DefaultDirectory(home, cfg.Workdir)
 			if *continueSession {
-				repository, err = session.Continue(dir)
+				repository, err = session.Continue(sessionDir)
 			} else {
-				repository, err = session.Create(dir, cfg.Workdir)
+				repository, err = session.Create(sessionDir, cfg.Workdir)
 			}
 		}
 		if err != nil {
@@ -231,7 +232,20 @@ func main() {
 	}
 	notice := startupNotice(cfg)
 	authPath := auth.Path(home)
-	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, ModelOptions: models.Catalog(), SessionInfo: func() string {
+	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, ModelOptions: models.Catalog(), NewSession: func() error {
+		if *noSession {
+			return nil
+		}
+		if sessionDir == "" {
+			sessionDir = filepath.Dir(cfg.SessionPath)
+		}
+		newRepository, createErr := session.Create(sessionDir, cfg.Workdir)
+		if createErr != nil {
+			return createErr
+		}
+		repository = newRepository
+		return nil
+	}, SessionInfo: func() string {
 		if repository == nil {
 			return "Session persistence is disabled."
 		}
