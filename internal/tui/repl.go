@@ -25,6 +25,8 @@ type Runner struct {
 	Logout       func(provider string) error
 	SelectModel  func(provider, model string) error
 	ModelOptions []models.Model
+	SessionInfo  func() string
+	SetName      func(string) error
 }
 type resultMsg struct {
 	messages []agent.Message
@@ -278,6 +280,29 @@ func (m *model) submit() tea.Cmd {
 				m.emit("Login failed: " + err.Error())
 			} else {
 				m.emit("Saved API key for " + parts[0] + ". Use /model or restart with -provider " + parts[0] + " -model <model-id>.")
+			}
+			return nil
+		case "session":
+			if m.runner.SessionInfo == nil {
+				m.emit("Session information is unavailable.")
+			} else {
+				m.emit(m.runner.SessionInfo())
+			}
+			return nil
+		case "name":
+			name := strings.TrimSpace(command.Arguments)
+			if name == "" {
+				m.emit("Usage: /name <session-name>")
+				return nil
+			}
+			if m.runner.SetName == nil {
+				m.emit("Session naming is unavailable.")
+				return nil
+			}
+			if err := m.runner.SetName(name); err != nil {
+				m.emit("Session name failed: " + err.Error())
+			} else {
+				m.emit("Session name: " + name)
 			}
 			return nil
 		case "logout":

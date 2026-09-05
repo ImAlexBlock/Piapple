@@ -123,6 +123,26 @@ func (r *Repository) AppendModelChange(provider, modelID string) error {
 	return nil
 }
 
+// AppendName records a display name without rewriting earlier session entries.
+func (r *Repository) AppendName(name string) error {
+	e := Entry{Type: "session_info", ID: newID(), ParentID: r.leaf, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Name: strings.TrimSpace(name)}
+	if err := r.write(e); err != nil {
+		return err
+	}
+	r.entries = append(r.entries, e)
+	r.leaf = &r.entries[len(r.entries)-1].ID
+	return nil
+}
+
+func (r *Repository) Name() string {
+	for i := len(r.entries) - 1; i >= 0; i-- {
+		if r.entries[i].Type == "session_info" && r.entries[i].Name != "" {
+			return r.entries[i].Name
+		}
+	}
+	return ""
+}
+
 // Model returns the most recently selected model in the session, if one has
 // been recorded. Entries are walked backwards because the session is an
 // append-only log and later changes supersede earlier ones.

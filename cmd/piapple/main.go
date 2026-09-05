@@ -207,7 +207,26 @@ func main() {
 	}
 	notice := startupNotice(cfg)
 	authPath := auth.Path(home)
-	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, ModelOptions: models.Catalog(), Shell: func(ctx context.Context, command string) (string, error) {
+	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, ModelOptions: models.Catalog(), SessionInfo: func() string {
+		if repository == nil {
+			return "Session persistence is disabled."
+		}
+		providerID, modelID, ok := repository.Model()
+		modelText := "not selected"
+		if ok {
+			modelText = providerID + "/" + modelID
+		}
+		name := repository.Name()
+		if name == "" {
+			name = "(unnamed)"
+		}
+		return fmt.Sprintf("Session %s\nName: %s\nMessages: %d\nModel: %s\nFile: %s", repository.Header().ID, name, len(repository.Context()), modelText, repository.Path())
+	}, SetName: func(name string) error {
+		if repository == nil {
+			return fmt.Errorf("session persistence is disabled")
+		}
+		return repository.AppendName(name)
+	}, Shell: func(ctx context.Context, command string) (string, error) {
 		return tools.RunShell(ctx, cfg.Workdir, command)
 	}, Login: func(provider, key string) error {
 		credentials, err := auth.Load(authPath)

@@ -71,3 +71,20 @@ func TestRepositoryModelReturnsLatestChange(t *testing.T) {
 		t.Fatalf("model=%q/%q ok=%v", provider, model, ok)
 	}
 }
+
+func TestRepositoryPersistsSessionName(t *testing.T) {
+	r, err := Create(t.TempDir(), "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AppendName("release work"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Open(r.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Name() != "release work" {
+		t.Fatalf("name=%q", loaded.Name())
+	}
+}
