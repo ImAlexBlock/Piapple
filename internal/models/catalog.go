@@ -38,6 +38,13 @@ var catalog = []Model{
 	{Provider: "together", ID: "meta-llama/Llama-3.3-70B-Instruct-Turbo", Name: "Llama 3.3 70B", ContextWindow: 131072},
 	{Provider: "fireworks", ID: "accounts/fireworks/models/llama-v3p3-70b-instruct", Name: "Llama 3.3 70B", ContextWindow: 131072},
 	{Provider: "perplexity", ID: "sonar-pro", Name: "Sonar Pro", ContextWindow: 127072},
+	{Provider: "moonshot", ID: "kimi-k2-0711-preview", Name: "Kimi K2", ContextWindow: 131072, Reasoning: true},
+	{Provider: "minimax", ID: "MiniMax-M1", Name: "MiniMax M1", ContextWindow: 1000000, Reasoning: true},
+	{Provider: "qwen", ID: "qwen-max", Name: "Qwen Max", ContextWindow: 32768},
+	{Provider: "qwen", ID: "qwen-plus", Name: "Qwen Plus", ContextWindow: 131072, Reasoning: true},
+	{Provider: "zai", ID: "GLM-4.5", Name: "GLM 4.5", ContextWindow: 131072, Reasoning: true},
+	{Provider: "siliconflow", ID: "deepseek-ai/DeepSeek-V3", Name: "DeepSeek V3", ContextWindow: 131072},
+	{Provider: "github", ID: "gpt-4o", Name: "GitHub GPT-4o", ContextWindow: 128000},
 }
 
 func Catalog() []Model { return append([]Model(nil), catalog...) }

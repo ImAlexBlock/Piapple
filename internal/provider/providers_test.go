@@ -59,6 +59,9 @@ func TestAllHTTPProvidersExposeStreaming(t *testing.T) {
 func TestAnthropicStreamParsesTextAndToolUse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n")
 		_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n")
 		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n")
 		_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"read\"}}\n\n")
@@ -87,7 +90,7 @@ func TestAnthropicStreamParsesTextAndToolUse(t *testing.T) {
 			t.Fatal(event.Err)
 		}
 	}
-	if answer != "hello" || final == nil || len(final.ToolCalls) != 1 || final.ToolCalls[0].Arguments != `{"path":"README.md"}` {
+	if answer != "hello" || final == nil || final.Reasoning != "plan" || final.ReasoningSignature != "sig" || len(final.ToolCalls) != 1 || final.ToolCalls[0].Arguments != `{"path":"README.md"}` {
 		t.Fatalf("answer=%q final=%#v", answer, final)
 	}
 }
@@ -135,4 +138,72 @@ func TestOpenAICompatibleChannelsAreConstructible(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
+}
+
+func TestProviderRegistryIncludesChannelsAndCompiledCustomFactory(t *testing.T) {
+	if info, ok := ChannelInfo("gemini"); !ok || info.Name != "google" || info.Protocol != ProtocolGoogle {
+		t.Fatalf("gemini info=%#v ok=%v", info, ok)
+	}
+	found := false
+	for _, channel := range Channels() {
+		if channel.Name == "openrouter" {
+			found = true
+			if channel.Protocol != ProtocolOpenAI {
+				t.Fatalf("channel=%#v", channel)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("openrouter channel missing")
+	}
+	name := "test-compiled-channel"
+	if err := Register(name, func(cfg Config) (agent.Provider, error) { return fakeProvider{}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(name, Config{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewAppliesCompiledDefaultEndpoint(t *testing.T) {
+	value, err := New("openai", Config{Model: "gpt-4o", APIKey: "key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openai, ok := value.(*openAI)
+	if !ok {
+		t.Fatalf("provider=%T", value)
+	}
+	if openai.BaseURL != "https://api.openai.com/v1" {
+		t.Fatalf("baseURL=%q", openai.BaseURL)
+	}
+}
+
+func TestExtendedThinkingLevelsRemainEnabledAcrossChannels(t *testing.T) {
+	if got := openAIReasoningEffort("max"); got != "high" {
+		t.Fatalf("openai max effort=%q", got)
+	}
+	if got := anthropicThinking("xhigh")["budget_tokens"]; got != 12288 {
+		t.Fatalf("anthropic xhigh budget=%v", got)
+	}
+	if got := googleThinking("max")["thinkingConfig"].(map[string]any)["thinkingBudget"]; got != 16384 {
+		t.Fatalf("google max budget=%v", got)
+	}
+}
+
+func TestAnthropicReplayIncludesOnlySignedThinkingBlocks(t *testing.T) {
+	unsigned := anthropicMessages(&anthropic{Config: Config{Model: "m"}}, []agent.Message{{Role: "assistant", Reasoning: "local trace"}}, nil, false)
+	if len(unsigned.Messages) != 1 || len(unsigned.Messages[0].Content) != 1 || unsigned.Messages[0].Content[0].Type != "text" {
+		t.Fatalf("unsigned replay=%#v", unsigned.Messages)
+	}
+	signed := anthropicMessages(&anthropic{Config: Config{Model: "m"}}, []agent.Message{{Role: "assistant", Reasoning: "provider trace", ReasoningSignature: "sig", Content: "answer"}}, nil, false)
+	if len(signed.Messages) != 1 || len(signed.Messages[0].Content) != 2 || signed.Messages[0].Content[0].Type != "thinking" || signed.Messages[0].Content[0].Signature != "sig" {
+		t.Fatalf("signed replay=%#v", signed.Messages)
+	}
+}
+
+type fakeProvider struct{}
+
+func (fakeProvider) Complete(context.Context, []agent.Message, []agent.ToolDefinition) (agent.Message, error) {
+	return agent.Message{Role: "assistant"}, nil
 }

@@ -17,17 +17,45 @@ type Config struct {
 	SessionPath  string
 }
 
-func APIKeyFromEnvironment(provider string) string {
-	keys := map[string]string{
-		"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "google": "GEMINI_API_KEY", "gemini": "GEMINI_API_KEY",
-		"xai": "XAI_API_KEY", "groq": "GROQ_API_KEY", "mistral": "MISTRAL_API_KEY", "deepseek": "DEEPSEEK_API_KEY",
-		"openrouter": "OPENROUTER_API_KEY", "together": "TOGETHER_API_KEY", "fireworks": "FIREWORKS_API_KEY", "perplexity": "PERPLEXITY_API_KEY",
-		"moonshot": "MOONSHOT_API_KEY", "kimi": "MOONSHOT_API_KEY", "zai": "ZAI_API_KEY", "minimax": "MINIMAX_API_KEY",
-		"siliconflow": "SILICONFLOW_API_KEY", "qwen": "DASHSCOPE_API_KEY", "dashscope": "DASHSCOPE_API_KEY", "github": "GITHUB_TOKEN",
-	}
-	return os.Getenv(keys[strings.ToLower(provider)])
+var providerEnvironmentKeys = map[string][]string{
+	"openai":      {"OPENAI_API_KEY"},
+	"anthropic":   {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"},
+	"google":      {"GEMINI_API_KEY", "GOOGLE_API_KEY"},
+	"gemini":      {"GEMINI_API_KEY", "GOOGLE_API_KEY"},
+	"xai":         {"XAI_API_KEY"},
+	"groq":        {"GROQ_API_KEY"},
+	"mistral":     {"MISTRAL_API_KEY"},
+	"deepseek":    {"DEEPSEEK_API_KEY"},
+	"openrouter":  {"OPENROUTER_API_KEY"},
+	"together":    {"TOGETHER_API_KEY"},
+	"fireworks":   {"FIREWORKS_API_KEY"},
+	"perplexity":  {"PERPLEXITY_API_KEY"},
+	"moonshot":    {"MOONSHOT_API_KEY", "KIMI_API_KEY"},
+	"kimi":        {"KIMI_API_KEY", "MOONSHOT_API_KEY"},
+	"zai":         {"ZAI_API_KEY", "ZAI_CODING_CN_API_KEY"},
+	"minimax":     {"MINIMAX_API_KEY"},
+	"siliconflow": {"SILICONFLOW_API_KEY"},
+	"qwen":        {"DASHSCOPE_API_KEY", "QWEN_API_KEY", "QWEN_TOKEN_PLAN_API_KEY", "QWEN_TOKEN_PLAN_CN_API_KEY"},
+	"dashscope":   {"DASHSCOPE_API_KEY", "QWEN_API_KEY", "QWEN_TOKEN_PLAN_API_KEY", "QWEN_TOKEN_PLAN_CN_API_KEY"},
+	"github":      {"GITHUB_TOKEN"},
 }
 
+// APIKeyEnvironmentNames returns the accepted environment variable names in
+// precedence order. It is exported so startup diagnostics can tell users the
+// exact variables accepted by a channel without duplicating this table.
+func APIKeyEnvironmentNames(provider string) []string {
+	keys := providerEnvironmentKeys[strings.ToLower(strings.TrimSpace(provider))]
+	return append([]string(nil), keys...)
+}
+
+func APIKeyFromEnvironment(provider string) string {
+	for _, key := range APIKeyEnvironmentNames(provider) {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
 func DefaultBaseURL(provider string) string {
 	switch strings.ToLower(provider) {
 	case "openai":

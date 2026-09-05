@@ -23,10 +23,75 @@ const maxLines = 2000
 type Builtins struct{ Workdir string }
 
 func (b Builtins) All() []agent.Tool {
-	return []agent.Tool{fileTool{b.Workdir, "read"}, fileTool{b.Workdir, "write"}, fileTool{b.Workdir, "edit"}, fileTool{b.Workdir, "bash"}, fileTool{b.Workdir, "grep"}, fileTool{b.Workdir, "find"}, fileTool{b.Workdir, "ls"}}
+	all, _ := b.Select(nil, nil, false)
+	return all
 }
 
-func Names() []string { return []string{"read", "write", "edit", "bash", "grep", "find", "ls"} }
+// Select returns the compiled built-in tools after applying the same include /
+// exclude semantics as Pi's --tools and --exclude-tools flags. The order is
+// stable so provider requests and snapshots remain deterministic.
+func (b Builtins) Select(include, exclude []string, disabled bool) ([]agent.Tool, error) {
+	if disabled {
+		return nil, nil
+	}
+	all := []agent.Tool{fileTool{b.Workdir, "read"}, fileTool{b.Workdir, "write"}, fileTool{b.Workdir, "edit"}, fileTool{b.Workdir, "bash"}, fileTool{b.Workdir, "grep"}, fileTool{b.Workdir, "find"}, fileTool{b.Workdir, "ls"}}
+	if runtime.GOOS == "windows" {
+		all = append(all, fileTool{b.Workdir, "powershell"})
+	}
+	available := make(map[string]struct{}, len(all))
+	for _, tool := range all {
+		available[tool.Definition().Name] = struct{}{}
+	}
+	for _, name := range append(append([]string{}, include...), exclude...) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if _, ok := available[name]; !ok {
+			return nil, fmt.Errorf("unknown built-in tool %q (available: %s)", name, strings.Join(Names(), ", "))
+		}
+	}
+	included := make(map[string]bool, len(include))
+	if len(include) > 0 {
+		for _, name := range include {
+			included[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+	}
+	excluded := make(map[string]bool, len(exclude))
+	for _, name := range exclude {
+		excluded[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	selected := make([]agent.Tool, 0, len(all))
+	for _, tool := range all {
+		name := tool.Definition().Name
+		if len(included) > 0 && !included[name] {
+			continue
+		}
+		if excluded[name] {
+			continue
+		}
+		selected = append(selected, tool)
+	}
+	return selected, nil
+}
+
+func Names() []string {
+	names := []string{"read", "write", "edit", "bash", "grep", "find", "ls"}
+	if runtime.GOOS == "windows" {
+		names = append(names, "powershell")
+	}
+	return names
+}
+
+func NamesOf(items []agent.Tool) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			out = append(out, item.Definition().Name)
+		}
+	}
+	return out
+}
 
 type fileTool struct{ workdir, name string }
 
@@ -39,11 +104,13 @@ func (t fileTool) Definition() agent.ToolDefinition {
 	case "edit":
 		return def("edit", "Make exact text replacements in a file. oldText must match exactly.", map[string]any{"path": str(), "edits": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"oldText": str(), "newText": str()}, "required": []string{"oldText", "newText"}}}})
 	case "grep":
-		return def("grep", "Search file contents using a regular expression.", map[string]any{"pattern": str(), "path": str(), "limit": map[string]any{"type": "integer"}})
+		return def("grep", "Search file contents for a regex or literal pattern. Respects .gitignore.", map[string]any{"pattern": str(), "path": map[string]any{"type": "string", "description": "Directory or file to search (default: current directory)"}, "glob": map[string]any{"type": "string", "description": "Filter files by glob"}, "ignoreCase": map[string]any{"type": "boolean"}, "literal": map[string]any{"type": "boolean"}, "context": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}})
 	case "find":
 		return def("find", "Find files by glob pattern.", map[string]any{"pattern": str(), "path": str(), "limit": map[string]any{"type": "integer"}})
 	case "ls":
-		return def("ls", "List directory contents.", map[string]any{"path": str(), "limit": map[string]any{"type": "integer"}})
+		return def("ls", "List directory contents. Includes dotfiles and sorts entries alphabetically.", map[string]any{"path": map[string]any{"type": "string", "description": "Directory to list (default: current directory)"}, "limit": map[string]any{"type": "integer"}})
+	case "powershell":
+		return def("powershell", "Execute a PowerShell command in the working directory.", map[string]any{"command": str(), "timeout": map[string]any{"type": "integer", "description": "seconds"}})
 	default:
 		return def("bash", "Execute a shell command in the working directory.", map[string]any{"command": str(), "timeout": map[string]any{"type": "integer", "description": "seconds"}})
 	}
@@ -52,7 +119,7 @@ func str() map[string]any { return map[string]any{"type": "string"} }
 func def(name, description string, props map[string]any) agent.ToolDefinition {
 	required := []string{}
 	switch name {
-	case "read", "ls":
+	case "read":
 		required = []string{"path"}
 	case "write":
 		required = []string{"path", "content"}
@@ -60,7 +127,7 @@ func def(name, description string, props map[string]any) agent.ToolDefinition {
 		required = []string{"path", "edits"}
 	case "grep", "find":
 		required = []string{"pattern"}
-	case "bash":
+	case "bash", "powershell":
 		required = []string{"command"}
 	}
 	parameters := map[string]any{"type": "object", "properties": props}
@@ -87,6 +154,8 @@ func (t fileTool) Execute(ctx context.Context, raw string) (string, error) {
 		return t.find(args)
 	case "ls":
 		return t.ls(args)
+	case "powershell":
+		return t.powershell(ctx, args)
 	default:
 		return t.bash(ctx, args)
 	}
@@ -112,7 +181,7 @@ func (t fileTool) path(args map[string]json.RawMessage) (string, error) {
 }
 func limited(value string) string {
 	if len(value) > maxOutput {
-		return "[output truncated]\n" + value[len(value)-maxOutput:]
+		return value[:maxOutput] + "\n[output truncated]"
 	}
 	return value
 }
@@ -214,6 +283,28 @@ func RunShell(ctx context.Context, workdir, command string) (string, error) {
 	return limited(string(out)), nil
 }
 
+func (t fileTool) powershell(ctx context.Context, args map[string]json.RawMessage) (string, error) {
+	command, err := arg(args, "command")
+	if err != nil {
+		return "", err
+	}
+	seconds := 0
+	_ = json.Unmarshal(args["timeout"], &seconds)
+	if seconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command)
+	cmd.Dir = t.workdir
+	out, runErr := cmd.CombinedOutput()
+	output := limited(string(out))
+	if runErr != nil {
+		return output, runErr
+	}
+	return output, nil
+}
+
 func (t fileTool) bash(ctx context.Context, args map[string]json.RawMessage) (string, error) {
 	command, err := arg(args, "command")
 	if err != nil {
@@ -274,40 +365,50 @@ func (t fileTool) find(args map[string]json.RawMessage) (string, error) {
 	}
 	root := optionalPath(args, t.workdir)
 	max := limit(args, 1000)
-	out := []string{}
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+	rules := loadIgnoreRules(root, t.workdir)
+	out := make([]string, 0, max)
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if d.IsDir() && d.Name() == ".git" {
-			return filepath.SkipDir
+		if ignoredByRules(root, path, d.IsDir(), rules) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			return nil
 		}
-		relative, _ := filepath.Rel(root, path)
-		matched, _ := filepath.Match(pattern, filepath.Base(path))
-		if !matched {
-			matched, _ = filepath.Match(pattern, filepath.ToSlash(relative))
-		}
-		if matched {
-			out = append(out, filepath.ToSlash(relative))
+		rel := relativeForRoot(root, path)
+		if globMatch(pattern, rel) || globMatch(pattern, filepath.Base(path)) {
+			out = append(out, rel)
 			if len(out) >= max {
 				return fs.SkipAll
 			}
 		}
 		return nil
 	})
-	if err != nil {
-		return "", err
+	if walkErr != nil {
+		return "", walkErr
 	}
 	sort.Strings(out)
 	return limited(strings.Join(out, "\n")), nil
 }
+
 func (t fileTool) grep(args map[string]json.RawMessage) (string, error) {
 	pattern, err := arg(args, "pattern")
 	if err != nil {
 		return "", err
+	}
+	var ignoreCase, literal bool
+	_ = json.Unmarshal(args["ignoreCase"], &ignoreCase)
+	_ = json.Unmarshal(args["literal"], &literal)
+	if literal {
+		pattern = regexp.QuoteMeta(pattern)
+	}
+	if ignoreCase {
+		pattern = "(?i)" + pattern
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -315,34 +416,195 @@ func (t fileTool) grep(args map[string]json.RawMessage) (string, error) {
 	}
 	root := optionalPath(args, t.workdir)
 	max := limit(args, 100)
-	out := []string{}
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	contextLines := 0
+	_ = json.Unmarshal(args["context"], &contextLines)
+	if contextLines < 0 {
+		contextLines = 0
+	}
+	glob := ""
+	_ = json.Unmarshal(args["glob"], &glob)
+	rules := loadIgnoreRules(root, t.workdir)
+	out := make([]string, 0, max)
+	walkErr := walkTextFiles(root, func(path string, data []byte) bool {
+		if isBinary(data) {
+			return true
 		}
-		if d.IsDir() && d.Name() == ".git" {
-			return filepath.SkipDir
+		if glob != "" {
+			rel := relativeForRoot(root, path)
+			if !globMatch(glob, rel) && !globMatch(glob, filepath.Base(path)) {
+				return true
+			}
+		}
+		lines := strings.Split(string(data), "\n")
+		emitted := map[int]bool{}
+		for lineNo, line := range lines {
+			if !re.MatchString(line) {
+				continue
+			}
+			from := lineNo - contextLines
+			if from < 0 {
+				from = 0
+			}
+			to := lineNo + contextLines
+			if to >= len(lines) {
+				to = len(lines) - 1
+			}
+			for i := from; i <= to; i++ {
+				if emitted[i] {
+					continue
+				}
+				emitted[i] = true
+				marker := ""
+				if i != lineNo {
+					marker = "-"
+				} else {
+					marker = ":"
+				}
+				out = append(out, fmt.Sprintf("%s:%d%s%s", relativeForRoot(root, path), i+1, marker, lines[i]))
+				if len(out) >= max {
+					return false
+				}
+			}
+		}
+		return len(out) < max
+	}, rules)
+	if walkErr != nil {
+		return "", walkErr
+	}
+	return limited(strings.Join(out, "\n")), nil
+}
+
+func isBinary(data []byte) bool {
+	for _, b := range data {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+type ignoreRule struct {
+	pattern string
+	negated bool
+	dirOnly bool
+}
+
+func loadIgnoreRules(root, workdir string) []ignoreRule {
+	base := root
+	if info, err := os.Stat(root); err == nil && !info.IsDir() {
+		base = filepath.Dir(root)
+	}
+	if base == "" {
+		base = workdir
+	}
+	data, err := os.ReadFile(filepath.Join(base, ".gitignore"))
+	if err != nil {
+		return nil
+	}
+	rules := []ignoreRule{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		r := ignoreRule{}
+		if strings.HasPrefix(line, "!") {
+			r.negated = true
+			line = line[1:]
+		}
+		r.dirOnly = strings.HasSuffix(line, "/")
+		line = strings.TrimSuffix(line, "/")
+		r.pattern = strings.TrimPrefix(filepath.ToSlash(line), "/")
+		if r.pattern != "" {
+			rules = append(rules, r)
+		}
+	}
+	return rules
+}
+func ignoredByRules(root, path string, isDir bool, rules []ignoreRule) bool {
+	if filepath.Base(path) == ".git" && isDir {
+		return true
+	}
+	if len(rules) == 0 {
+		return false
+	}
+	rel := relativeForRoot(root, path)
+	ignored := false
+	for _, rule := range rules {
+		if rule.dirOnly && !isDir {
+			continue
+		}
+		matched := globMatch(rule.pattern, rel) || (!strings.Contains(rule.pattern, "/") && globMatch(rule.pattern, filepath.Base(rel)))
+		if matched {
+			ignored = !rule.negated
+		}
+	}
+	return ignored
+}
+func relativeForRoot(root, path string) string {
+	if info, err := os.Stat(root); err == nil && !info.IsDir() {
+		return filepath.ToSlash(filepath.Base(path))
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.ToSlash(path)
+	}
+	return filepath.ToSlash(rel)
+}
+func globMatch(pattern, value string) bool {
+	pattern = filepath.ToSlash(pattern)
+	value = filepath.ToSlash(value)
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				i++
+				if i+1 < len(pattern) && pattern[i+1] == '/' {
+					i++
+					b.WriteString("(?:.*/)?")
+				} else {
+					b.WriteString(".*")
+				}
+			} else {
+				b.WriteString("[^/]*")
+			}
+		case '?':
+			b.WriteString("[^/]")
+		case '.', '+', '(', ')', '[', ']', '{', '}', '^', '$', '|', '\\':
+			b.WriteByte('\\')
+			b.WriteByte(pattern[i])
+		default:
+			b.WriteByte(pattern[i])
+		}
+	}
+	b.WriteString("$")
+	matched, _ := regexp.MatchString(b.String(), value)
+	return matched
+}
+
+func walkTextFiles(root string, visit func(string, []byte) bool, rules []ignoreRule) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if ignoredByRules(root, path, d.IsDir(), rules) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			return nil
 		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
+		data, err := os.ReadFile(path)
+		if err != nil {
 			return nil
 		}
-		relative, _ := filepath.Rel(root, path)
-		for lineNo, line := range strings.Split(string(data), "\n") {
-			if re.MatchString(line) {
-				out = append(out, fmt.Sprintf("%s:%d:%s", filepath.ToSlash(relative), lineNo+1, line))
-				if len(out) >= max {
-					return fs.SkipAll
-				}
-			}
+		if !visit(path, data) {
+			return fs.SkipAll
 		}
 		return nil
 	})
-	if err != nil {
-		return "", err
-	}
-	return limited(strings.Join(out, "\n")), nil
 }

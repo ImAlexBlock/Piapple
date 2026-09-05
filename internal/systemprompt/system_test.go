@@ -13,3 +13,19 @@ func TestBuildIncludesStableEnvironmentAndInstructions(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildUsesPiStyleDefaultPromptAndToolSnippets(t *testing.T) {
+	prompt := Build("", "/repo", nil, []string{"read", "bash", "unknown"})
+	for _, want := range []string{
+		"expert coding assistant",
+		"# Available tools",
+		"- read: read a text file",
+		"- bash: run a shell command",
+		"# Guidelines",
+		"Working directory: /repo",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("default prompt missing %q: %s", want, prompt)
+		}
+	}
+}

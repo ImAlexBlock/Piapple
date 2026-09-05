@@ -27,3 +27,15 @@ func TestPiCompatibleAuthPath(t *testing.T) {
 		t.Fatalf("path=%q", got)
 	}
 }
+
+func TestCredentialStoreNormalizesProviderAliases(t *testing.T) {
+	file := File{}
+	file.Set("gemini", "google-key")
+	if file.Get("google") != "google-key" || file.Get("gemini") != "google-key" {
+		t.Fatalf("credentials=%#v", file)
+	}
+	file.Delete("gemini")
+	if file.Get("google") != "" {
+		t.Fatal("alias delete failed")
+	}
+}

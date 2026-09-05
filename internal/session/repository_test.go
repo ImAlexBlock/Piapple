@@ -139,3 +139,117 @@ func TestCompactionStartsResumedContextAtSummary(t *testing.T) {
 		t.Fatalf("context=%#v", context)
 	}
 }
+
+func TestRepositoryBranchesContextFromSelectedLeaf(t *testing.T) {
+	r, err := Create(t.TempDir(), "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.AppendMessage(agent.Message{Role: "user", Content: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	rootID := r.Entries()[0].ID
+	if err = r.AppendMessage(agent.Message{Role: "assistant", Content: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	assistantID := r.Entries()[1].ID
+	if err = r.Branch(rootID); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.AppendMessage(agent.Message{Role: "assistant", Content: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := r.Context()
+	if len(ctx) != 2 || ctx[0].Content != "root" || ctx[1].Content != "second" {
+		t.Fatalf("ctx=%#v", ctx)
+	}
+	children := r.Children(rootID)
+	if len(children) != 2 || children[0].ID != assistantID {
+		t.Fatalf("children=%#v", children)
+	}
+	if !strings.Contains(r.Tree(), rootID) || !strings.Contains(r.Tree(), "message/assistant") {
+		t.Fatalf("tree=%q", r.Tree())
+	}
+}
+
+func TestRepositoryCompactionRetainsExplicitFirstEntry(t *testing.T) {
+	r, err := Create(t.TempDir(), "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.AppendMessage(agent.Message{Role: "user", Content: "old"})
+	_ = r.AppendMessage(agent.Message{Role: "assistant", Content: "keep"})
+	keepID := r.Entries()[1].ID
+	_ = r.AppendMessage(agent.Message{Role: "user", Content: "latest"})
+	if err := r.AppendCompactionAt("summary", keepID, 99); err != nil {
+		t.Fatal(err)
+	}
+	ctx := r.Context()
+	if len(ctx) != 3 || ctx[0].Role != "system" || ctx[1].Content != "keep" || ctx[2].Content != "latest" {
+		t.Fatalf("ctx=%#v", ctx)
+	}
+	entry := r.Entries()[len(r.Entries())-1]
+	if entry.FirstKeptEntryID != keepID || entry.TokensBefore != 99 {
+		t.Fatalf("entry=%#v", entry)
+	}
+}
+
+func TestRepositoryStateFollowsActiveBranch(t *testing.T) {
+	r, err := Create(t.TempDir(), "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AppendModelChange("openai", "gpt-root"); err != nil {
+		t.Fatal(err)
+	}
+	root := r.Entries()[0].ID
+	if err := r.AppendName("root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AppendThinking("low"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Branch(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AppendModelChange("anthropic", "claude-branch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AppendName("branch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AppendThinking("high"); err != nil {
+		t.Fatal(err)
+	}
+	if provider, model, ok := r.Model(); !ok || provider != "anthropic" || model != "claude-branch" {
+		t.Fatalf("branch model=%q/%q ok=%v", provider, model, ok)
+	}
+	if r.Name() != "branch" || r.Thinking() != "high" {
+		t.Fatalf("branch state name=%q thinking=%q", r.Name(), r.Thinking())
+	}
+	if err := r.Branch(root); err != nil {
+		t.Fatal(err)
+	}
+	if provider, model, ok := r.Model(); !ok || provider != "openai" || model != "gpt-root" {
+		t.Fatalf("root model=%q/%q ok=%v", provider, model, ok)
+	}
+	if r.Name() != "" || r.Thinking() != "" {
+		t.Fatalf("inactive branch leaked name=%q thinking=%q", r.Name(), r.Thinking())
+	}
+}
+
+func TestFindByIDAcceptsUniquePrefix(t *testing.T) {
+	dir := t.TempDir()
+	first, err := Create(dir, "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := first.Header().ID
+	path, err := FindByID(dir, id[:8])
+	if err != nil || path != first.Path() {
+		t.Fatalf("path=%q err=%v", path, err)
+	}
+	if _, err := OpenByID(dir, "missing"); err == nil {
+		t.Fatal("missing session was accepted")
+	}
+}

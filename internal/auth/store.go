@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type APIKeyCredential struct {
@@ -42,11 +43,28 @@ func Save(path string, file File) error {
 	return os.WriteFile(path, append(data, '\n'), 0600)
 }
 func (f File) Get(provider string) string {
-	credential, ok := f[provider]
+	credential, ok := f[normalizeProvider(provider)]
 	if !ok || credential.Type != "api_key" {
 		return ""
 	}
 	return credential.Key
 }
-func (f File) Set(provider, key string) { f[provider] = APIKeyCredential{Type: "api_key", Key: key} }
-func (f File) Delete(provider string)   { delete(f, provider) }
+
+func (f File) Set(provider, key string) {
+	f[normalizeProvider(provider)] = APIKeyCredential{Type: "api_key", Key: key}
+}
+
+func (f File) Delete(provider string) { delete(f, normalizeProvider(provider)) }
+
+func normalizeProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "gemini":
+		return "google"
+	case "kimi":
+		return "moonshot"
+	case "dashscope":
+		return "qwen"
+	default:
+		return strings.ToLower(strings.TrimSpace(provider))
+	}
+}

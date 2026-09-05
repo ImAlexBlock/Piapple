@@ -8,6 +8,7 @@ import (
 	"github.com/ImAlexBlock/Piapple/internal/agent"
 	"github.com/ImAlexBlock/Piapple/internal/models"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestViewportScrollKeepsComposerAtBottom(t *testing.T) {
@@ -121,5 +122,101 @@ func TestInteractiveLoginMasksAndStoresKey(t *testing.T) {
 	m.submit()
 	if gotProvider != "openai" || gotKey != "secret" || m.loginProvider != "" {
 		t.Fatalf("provider=%q key=%q mode=%q", gotProvider, gotKey, m.loginProvider)
+	}
+}
+
+func TestResumeCommandOpensInteractiveSessionPicker(t *testing.T) {
+	selected := ""
+	r := &Runner{Loop: &agent.Loop{}, SessionOptions: func() []SessionChoice {
+		return []SessionChoice{{Path: "one.jsonl", Label: "one", Detail: "1 message"}, {Path: "two.jsonl", Label: "two", Detail: "2 messages"}}
+	}, SelectSession: func(path string) ([]agent.Message, error) {
+		selected = path
+		return []agent.Message{{Role: "user", Content: path}}, nil
+	}}
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, runner: r, input: "/resume"}
+	if cmd := m.submit(); cmd != nil || !m.sessionPicker {
+		t.Fatalf("picker=%v cmd=%v", m.sessionPicker, cmd)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if selected != "two.jsonl" || m.sessionPicker || len(m.runner.Transcript) != 1 {
+		t.Fatalf("selected=%q picker=%v transcript=%#v", selected, m.sessionPicker, m.runner.Transcript)
+	}
+}
+
+func TestTreeCommandSwitchesActiveBranch(t *testing.T) {
+	selected := ""
+	r := &Runner{Loop: &agent.Loop{}, TreeOptions: func() []TreeChoice {
+		return []TreeChoice{{ID: "root", Label: "user: root"}, {ID: "child", Label: "assistant: child", Depth: 1}}
+	}, SelectTreeEntry: func(id string) ([]agent.Message, error) {
+		selected = id
+		return []agent.Message{{Role: "user", Content: id}}, nil
+	}}
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, runner: r, input: "/tree"}
+	m.submit()
+	if !m.treePicker {
+		t.Fatal("tree picker did not open")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if selected != "child" || m.treePicker || m.runner.Transcript[0].Content != "child" {
+		t.Fatalf("selected=%q picker=%v transcript=%#v", selected, m.treePicker, m.runner.Transcript)
+	}
+}
+
+func TestCopyCommandUsesLastAssistantMessage(t *testing.T) {
+	var copied string
+	r := &Runner{Loop: &agent.Loop{}, Transcript: []agent.Message{{Role: "user", Content: "question"}, {Role: "assistant", Content: "answer"}}, CopyText: func(text string) error { copied = text; return nil }}
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, runner: r, input: "/copy"}
+	m.submit()
+	if copied != "answer" {
+		t.Fatalf("copied=%q", copied)
+	}
+}
+
+func TestCtrlPCyclesModelWithoutMovingComposer(t *testing.T) {
+	selected := ""
+	r := &Runner{Loop: &agent.Loop{}, CurrentModel: func() string { return "openai/one" }, ModelOptions: []models.Model{{Provider: "openai", ID: "one"}, {Provider: "openai", ID: "two"}}, SelectModel: func(provider, model string) error {
+		selected = provider + "/" + model
+		return nil
+	}}
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, width: 72, height: 12, runner: r}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if selected != "openai/two" || !strings.Contains(m.View(), "openai/one") {
+		t.Fatalf("selected=%q view=%q", selected, m.View())
+	}
+}
+
+func TestTranscriptANSIWrappingUsesTerminalWidth(t *testing.T) {
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, width: 48, height: 12, runner: &Runner{Loop: &agent.Loop{}}}
+	m.lines = []string{userStyle.Render(strings.Repeat("x", 100))}
+	content := m.allContentLines()
+	for _, line := range content {
+		if lipgloss.Width(line) > m.contentWidth() {
+			t.Fatalf("line width=%d max=%d line=%q", lipgloss.Width(line), m.contentWidth(), line)
+		}
+	}
+}
+
+func TestResultRendersToolResultsAndAssistantOnce(t *testing.T) {
+	r := &Runner{Loop: &agent.Loop{}}
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, runner: r, lines: []string{"sent"}}
+	m.Update(resultMsg{
+		messages: []agent.Message{
+			{Role: "user", Content: "read README"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "1", Name: "read", Arguments: `{"path":"README.md"}`}}},
+			{Role: "tool", ToolName: "read", Content: "file contents"},
+			{Role: "assistant", Content: "Done."},
+		},
+		answer:      "Done.",
+		renderFrom:  0,
+		renderAgent: true,
+	})
+	view := strings.Join(m.lines, "\n")
+	if !strings.Contains(view, "file contents") || !strings.Contains(view, "Done.") {
+		t.Fatalf("rendered lines=%q", view)
+	}
+	if strings.Count(view, "Done.") != 1 {
+		t.Fatalf("assistant answer rendered more than once: %q", view)
 	}
 }

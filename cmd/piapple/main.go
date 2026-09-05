@@ -3,19 +3,22 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
 	"github.com/ImAlexBlock/Piapple/internal/auth"
+	"github.com/ImAlexBlock/Piapple/internal/cli"
+	"github.com/ImAlexBlock/Piapple/internal/clipboard"
 	"github.com/ImAlexBlock/Piapple/internal/config"
 	"github.com/ImAlexBlock/Piapple/internal/models"
 	"github.com/ImAlexBlock/Piapple/internal/projectcontext"
 	"github.com/ImAlexBlock/Piapple/internal/provider"
+	"github.com/ImAlexBlock/Piapple/internal/rpc"
 	"github.com/ImAlexBlock/Piapple/internal/session"
 	"github.com/ImAlexBlock/Piapple/internal/settings"
 	"github.com/ImAlexBlock/Piapple/internal/systemprompt"
@@ -24,27 +27,40 @@ import (
 )
 
 func main() {
-	var cfg config.Config
-	flag.StringVar(&cfg.Provider, "provider", "", "provider: openai, anthropic, or google")
-	flag.StringVar(&cfg.Model, "model", "", "model ID")
-	flag.StringVar(&cfg.BaseURL, "base-url", "", "provider base URL")
-	flag.StringVar(&cfg.APIKey, "api-key", "", "API key (defaults to provider environment variable)")
-	flag.StringVar(&cfg.SystemPrompt, "system", "You are Piapple, a concise expert coding assistant. Inspect before editing and explain completed work.", "system prompt")
-	flag.StringVar(&cfg.Thinking, "thinking", "", "thinking level: off, minimal, low, medium, or high")
-	flag.IntVar(&cfg.MaxSteps, "max-steps", 12, "maximum model/tool rounds")
-	flag.StringVar(&cfg.Workdir, "C", ".", "working directory")
-	flag.StringVar(&cfg.Workdir, "cwd", ".", "working directory")
-	flag.StringVar(&cfg.SessionPath, "session", "", "session JSONL file")
-	continueSession := flag.Bool("continue", false, "continue the most recent project session")
-	flag.BoolVar(continueSession, "c", false, "continue the most recent project session")
-	noSession := flag.Bool("no-session", false, "do not persist session history")
-	printMode := flag.Bool("p", false, "print the answer without starting the TUI")
-	flag.BoolVar(printMode, "print", false, "print the answer without starting the TUI")
-	jsonMode := flag.Bool("json", false, "print the final answer as JSON")
-	// Pi documents long options with `--`; normalize them before Go's flag parser.
-	os.Args = append([]string{os.Args[0]}, normalizeLongOptions(os.Args[1:])...)
-	flag.Parse()
-	// Keep raw CLI overrides separate from resolved settings so switching models
+	opts, parseErr := cli.Parse(os.Args[1:])
+	if parseErr != nil {
+		fmt.Fprintln(os.Stderr, "piapple:", parseErr)
+		fmt.Fprintln(os.Stderr, cli.Usage())
+		os.Exit(2)
+	}
+	if opts.Help {
+		fmt.Println(cli.Usage())
+		return
+	}
+	if opts.Version {
+		fmt.Println("piapple dev")
+		return
+	}
+	if opts.ListModels {
+		items := models.Sort(models.Catalog())
+		filter := strings.ToLower(strings.TrimSpace(opts.ModelFilter))
+		for _, item := range items {
+			if filter != "" && !strings.Contains(strings.ToLower(item.Ref()), filter) && !strings.Contains(strings.ToLower(item.Name), filter) {
+				continue
+			}
+			fmt.Printf("%-14s %-48s %s\n", item.Provider, item.ID, item.Name)
+		}
+		return
+	}
+	cfg := opts.Config
+	if opts.Mode == cli.ModeJSON {
+		opts.JSON, opts.Print = true, true
+	}
+	if cfg.Provider == "" && strings.Contains(cfg.Model, "/") {
+		if providerID, modelID, modelErr := models.ParseRef(cfg.Model); modelErr == nil {
+			cfg.Provider, cfg.Model = providerID, modelID
+		}
+	} // Keep raw CLI overrides separate from resolved settings so switching models
 	// later does not accidentally reuse an API key or endpoint for another provider.
 	cliAPIKey := cfg.APIKey
 	cliBaseURL := cfg.BaseURL
@@ -72,19 +88,40 @@ func main() {
 	if selected := settings.Resolve(cliModel, projectSettings, userSettings); selected != nil {
 		cfg.Provider, cfg.Model = selected.Provider, selected.ID
 	}
+	if cfg.Thinking == "" {
+		if projectSettings.DefaultThinkingLevel != "" {
+			cfg.Thinking = projectSettings.DefaultThinkingLevel
+		} else {
+			cfg.Thinking = userSettings.DefaultThinkingLevel
+		}
+	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = config.DefaultBaseURL(cfg.Provider)
 	}
 	baseSystemPrompt := cfg.SystemPrompt
-	contextFiles, err := projectcontext.Load(cfg.Workdir)
-	if err != nil {
-		fatal(err.Error())
+	builtins := tools.Builtins{Workdir: cfg.Workdir}
+	selectedTools, toolErr := builtins.Select(opts.Tools, opts.ExcludeTools, opts.NoTools || opts.NoBuiltinTools)
+	if toolErr != nil {
+		fatal(toolErr.Error())
 	}
-	promptFiles := make([]systemprompt.ContextFile, 0, len(contextFiles))
-	for _, file := range contextFiles {
-		promptFiles = append(promptFiles, systemprompt.ContextFile{Path: file.Path, Content: file.Content})
+	toolNames := tools.NamesOf(selectedTools)
+	promptFiles := []systemprompt.ContextFile(nil)
+	if !opts.NoContextFiles {
+		contextFiles, loadErr := projectcontext.Load(cfg.Workdir)
+		if loadErr != nil {
+			fatal(loadErr.Error())
+		}
+		promptFiles = make([]systemprompt.ContextFile, 0, len(contextFiles))
+		for _, file := range contextFiles {
+			promptFiles = append(promptFiles, systemprompt.ContextFile{Path: file.Path, Content: file.Content})
+		}
 	}
-	cfg.SystemPrompt = systemprompt.Build(cfg.SystemPrompt, cfg.Workdir, promptFiles, tools.Names())
+	cfg.SystemPrompt = systemprompt.Build(cfg.SystemPrompt, cfg.Workdir, promptFiles, toolNames)
+	for _, addition := range opts.AppendSystemPrompt {
+		if strings.TrimSpace(addition) != "" {
+			cfg.SystemPrompt += "\n\n" + strings.TrimSpace(addition)
+		}
+	}
 	if cfg.APIKey == "" {
 		cfg.APIKey = config.APIKeyFromEnvironment(cfg.Provider)
 	}
@@ -104,20 +141,47 @@ func main() {
 	}
 	var repository *session.Repository
 	var sessionDir string
-	if !*noSession {
-		if cfg.SessionPath != "" {
+	if !opts.NoSession {
+		if opts.SessionDir != "" {
+			sessionDir = resolvePath(cfg.Workdir, opts.SessionDir)
+		} else if cfg.SessionPath != "" {
 			sessionDir = filepath.Dir(cfg.SessionPath)
-			repository, err = session.Open(cfg.SessionPath)
 		} else {
 			sessionDir = session.DefaultDirectory(home, cfg.Workdir)
-			if *continueSession {
-				repository, err = session.Continue(sessionDir)
-			} else {
-				repository, err = session.Create(sessionDir, cfg.Workdir)
+		}
+		switch {
+		case opts.Fork != "":
+			sourcePath := resolvePath(cfg.Workdir, opts.Fork)
+			if _, statErr := os.Stat(sourcePath); statErr != nil {
+				if resolved, findErr := session.FindByID(sessionDir, opts.Fork); findErr == nil {
+					sourcePath = resolved
+				} else {
+					err = fmt.Errorf("fork source %q not found", opts.Fork)
+					break
+				}
 			}
+			source, openErr := session.Open(sourcePath)
+			if openErr != nil {
+				err = openErr
+				break
+			}
+			repository, err = source.Clone(sessionDir, true)
+		case opts.SessionID != "":
+			repository, err = session.OpenByID(sessionDir, opts.SessionID)
+		case cfg.SessionPath != "":
+			repository, err = session.Open(cfg.SessionPath)
+		case opts.Continue:
+			repository, err = session.Continue(sessionDir)
+		default:
+			repository, err = session.Create(sessionDir, cfg.Workdir)
 		}
 		if err != nil {
 			fatal(fmt.Sprintf("session: %v", err))
+		}
+		if opts.Name != "" {
+			if err = repository.AppendName(opts.Name); err != nil {
+				fatal(fmt.Sprintf("session name: %v", err))
+			}
 		}
 	}
 	// A resumed Pi session records its active model in the session tree. It has
@@ -175,23 +239,26 @@ func main() {
 		if createErr != nil {
 			return nil, createErr
 		}
-		builtins := tools.Builtins{Workdir: cfg.Workdir}
-		return agent.NewLoop(p, builtins.All(), cfg.MaxSteps, func(e agent.Event) {
+		return agent.NewLoop(p, selectedTools, cfg.MaxSteps, func(e agent.Event) {
 			if e.Type == "tool_start" {
 				fmt.Fprintln(os.Stderr, "[tool]", e.Detail)
 			}
 		}), nil
 	}
 	var loop *agent.Loop
+	var loopStartupErr error
 	if cfg.Provider != "" && cfg.Model != "" {
-		loop, err = createLoop(cfg.Provider, cfg.Model)
-		if err != nil {
-			fatal(err.Error())
-		}
+		loop, loopStartupErr = createLoop(cfg.Provider, cfg.Model)
 	}
 	if loop == nil {
-		builtins := tools.Builtins{Workdir: cfg.Workdir}
-		loop = agent.NewLoop(nil, builtins.All(), cfg.MaxSteps, nil)
+		loop = agent.NewLoop(nil, selectedTools, cfg.MaxSteps, nil)
+	}
+	if repository != nil && cfg.Provider != "" && cfg.Model != "" {
+		if _, _, ok := repository.Model(); !ok {
+			if appendErr := repository.AppendModelChange(cfg.Provider, cfg.Model); appendErr != nil {
+				fatal(appendErr.Error())
+			}
+		}
 	}
 	transcript := []agent.Message{}
 	if repository != nil {
@@ -208,8 +275,47 @@ func main() {
 		}
 		return nil
 	}
-	prompt := strings.TrimSpace(strings.Join(flag.Args(), " "))
-	// Match Pi's non-interactive behavior: a prompt supplied on the command
+	prompt := strings.TrimSpace(strings.Join(opts.Messages, " "))
+	if len(opts.FileArgs) > 0 {
+		promptWithFiles, fileErr := appendFileArguments(cfg.Workdir, prompt, opts.FileArgs)
+		if fileErr != nil {
+			fatal(fileErr.Error())
+		}
+		prompt = promptWithFiles
+	}
+	modelRefs := opts.ModelRefs
+	if len(modelRefs) == 0 {
+		for _, configured := range [][]settings.ModelRef{projectSettings.EnabledModels, userSettings.EnabledModels} {
+			if len(configured) > 0 {
+				modelRefs = make([]string, 0, len(configured))
+				for _, ref := range configured {
+					modelRefs = append(modelRefs, ref.Provider+"/"+ref.ID)
+				}
+				break
+			}
+		}
+	}
+	modelOptions := models.Sort(models.Catalog())
+	if len(modelRefs) > 0 {
+		modelOptions = make([]models.Model, 0, len(modelRefs))
+		for _, ref := range modelRefs {
+			providerID, modelID, parseErr := models.ParseRef(ref)
+			if parseErr != nil {
+				fatal(fmt.Sprintf("--models: %v (%q)", parseErr, ref))
+			}
+			item, _ := models.Find(providerID, modelID)
+			modelOptions = append(modelOptions, item)
+		}
+	}
+	if opts.Export != "" {
+		if repository == nil {
+			fatal("session export requires session persistence")
+		}
+		if exportErr := repository.Export(resolvePath(cfg.Workdir, opts.Export)); exportErr != nil {
+			fatal(fmt.Sprintf("export: %v", exportErr))
+		}
+		return
+	} // Match Pi's non-interactive behavior: a prompt supplied on the command
 	// line, -p/--print, or stdin redirected from a pipe uses print mode.
 	stdinInfo, _ := os.Stdin.Stat()
 	nonInteractive := stdinInfo != nil && stdinInfo.Mode()&os.ModeCharDevice == 0
@@ -220,34 +326,58 @@ func main() {
 		}
 		prompt = strings.TrimSpace(string(data))
 	}
-	if prompt != "" && (*printMode || nonInteractive || len(flag.Args()) > 0) {
+	if prompt != "" && (opts.Print || nonInteractive || len(opts.Messages) > 0 || len(opts.FileArgs) > 0) {
 		if loop.Provider == nil {
+			if loopStartupErr != nil {
+				fatal(loopStartupErr.Error())
+			}
 			fatal(startupConfigurationError(cfg))
 		}
 		before := len(transcript)
-		transcript = append(transcript, agent.Message{Role: "user", Content: prompt})
+		transcript = append(transcript, agent.Message{Role: "user", Content: prompt, Timestamp: time.Now().UnixMilli()})
+		var restoreSink func()
+		if opts.JSON {
+			restoreSink = loop.SetEventSink(func(event agent.Event) {
+				writeJSONEvent(event)
+			})
+		}
 		updated, answer, err := loop.Run(context.Background(), transcript)
+		if restoreSink != nil {
+			restoreSink()
+		}
 		if appendErr := persist(updated[before:]); appendErr != nil {
 			fatal(appendErr.Error())
 		}
 		if err != nil {
+			if opts.JSON {
+				writeJSONEvent(agent.Event{Type: "error", Detail: err.Error()})
+			}
 			fatal(err.Error())
 		}
-		if *jsonMode {
-			payload, marshalErr := json.Marshal(map[string]any{"type": "result", "answer": answer, "model": cfg.Provider + "/" + cfg.Model})
-			if marshalErr != nil {
-				fatal(marshalErr.Error())
-			}
-			fmt.Println(string(payload))
+		if opts.JSON {
+			writeJSONResult(answer, cfg.Provider+"/"+cfg.Model)
 		} else {
 			fmt.Println(answer)
 		}
 		return
 	}
 	notice := startupNotice(cfg)
+	if loopStartupErr != nil {
+		notice = loopStartupErr.Error()
+	}
+	tuiMode := strings.ToLower(strings.TrimSpace(opts.TUI))
+	if tuiMode == "" {
+		tuiMode = strings.ToLower(strings.TrimSpace(projectSettings.TUIMode))
+	}
+	if tuiMode == "" {
+		tuiMode = strings.ToLower(strings.TrimSpace(userSettings.TUIMode))
+	}
+	if tuiMode == "" {
+		tuiMode = "fullscreen"
+	}
 	authPath := auth.Path(home)
-	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, ModelOptions: models.Catalog(), NewSession: func() error {
-		if *noSession {
+	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, ModelOptions: modelOptions, Fullscreen: tuiMode != "regular", NewSession: func() error {
+		if opts.NoSession {
 			return nil
 		}
 		if sessionDir == "" {
@@ -294,8 +424,14 @@ func main() {
 		}
 		credentials.Delete(provider)
 		return auth.Save(authPath, credentials)
-	}}
-
+	}, CopyText: clipboard.Write, OpenSessionPicker: opts.Resume}
+	runner.CurrentModel = func() string {
+		if cfg.Provider == "" || cfg.Model == "" {
+			return "no model selected"
+		}
+		return cfg.Provider + "/" + cfg.Model
+	}
+	runner.CurrentThinking = func() string { return cfg.Thinking }
 	runner.SelectModel = func(providerID, modelID string) error {
 		selected, selectErr := createLoop(providerID, modelID)
 		if selectErr != nil {
@@ -339,6 +475,69 @@ func main() {
 		}
 		return nil
 	}
+	runner.SessionOptions = func() []tui.SessionChoice {
+		if sessionDir == "" {
+			return nil
+		}
+		items, listErr := session.List(sessionDir)
+		if listErr != nil {
+			return nil
+		}
+		choices := make([]tui.SessionChoice, 0, len(items))
+		for _, item := range items {
+			label := item.Name
+			if label == "" {
+				label = filepath.Base(item.Path)
+			}
+			detail := fmt.Sprintf("%d messages", item.Messages)
+			if item.Model != "" {
+				detail += "  " + item.Model
+			}
+			choices = append(choices, tui.SessionChoice{Path: item.Path, Label: label, Detail: detail})
+		}
+		return choices
+	}
+	runner.SelectSession = func(path string) ([]agent.Message, error) {
+		next, openErr := session.Open(resolveSessionPath(path))
+		if openErr != nil {
+			return nil, openErr
+		}
+		if err := adoptRepository(next); err != nil {
+			return nil, err
+		}
+		return runner.Transcript, nil
+	}
+	runner.TreeOptions = func() []tui.TreeChoice {
+		if repository == nil {
+			return nil
+		}
+		entries := repository.TreeItems()
+		choices := make([]tui.TreeChoice, 0, len(entries))
+		for _, item := range entries {
+			choices = append(choices, tui.TreeChoice{ID: item.ID, Label: item.Label, Depth: item.Depth, Active: item.Active})
+		}
+		return choices
+	}
+	runner.SelectTreeEntry = func(id string) ([]agent.Message, error) {
+		if repository == nil {
+			return nil, fmt.Errorf("session persistence is disabled")
+		}
+		if err := repository.Branch(strings.TrimSpace(id)); err != nil {
+			return nil, err
+		}
+		if providerID, modelID, ok := repository.Model(); ok {
+			if providerID != cfg.Provider || modelID != cfg.Model {
+				selected, createErr := createLoop(providerID, modelID)
+				if createErr != nil {
+					return nil, createErr
+				}
+				runner.Loop = selected
+				cfg.Provider, cfg.Model = providerID, modelID
+			}
+		}
+		return repository.Context(), nil
+	}
+
 	runner.SettingsView = func() string {
 		projectModel := "not set"
 		if projectSettings.DefaultModel != nil {
@@ -360,15 +559,23 @@ func main() {
 		if loadErr != nil {
 			return loadErr
 		}
-		contextFiles, loadErr := projectcontext.Load(cfg.Workdir)
-		if loadErr != nil {
-			return loadErr
+		promptFiles := []systemprompt.ContextFile(nil)
+		if !opts.NoContextFiles {
+			contextFiles, contextErr := projectcontext.Load(cfg.Workdir)
+			if contextErr != nil {
+				return contextErr
+			}
+			promptFiles = make([]systemprompt.ContextFile, 0, len(contextFiles))
+			for _, file := range contextFiles {
+				promptFiles = append(promptFiles, systemprompt.ContextFile{Path: file.Path, Content: file.Content})
+			}
 		}
-		promptFiles := make([]systemprompt.ContextFile, 0, len(contextFiles))
-		for _, file := range contextFiles {
-			promptFiles = append(promptFiles, systemprompt.ContextFile{Path: file.Path, Content: file.Content})
+		cfg.SystemPrompt = systemprompt.Build(baseSystemPrompt, cfg.Workdir, promptFiles, toolNames)
+		for _, addition := range opts.AppendSystemPrompt {
+			if strings.TrimSpace(addition) != "" {
+				cfg.SystemPrompt += "\n\n" + strings.TrimSpace(addition)
+			}
 		}
-		cfg.SystemPrompt = systemprompt.Build(baseSystemPrompt, cfg.Workdir, promptFiles, tools.Names())
 		if runner.Loop != nil && cfg.Provider != "" && cfg.Model != "" {
 			next, createErr := createLoop(cfg.Provider, cfg.Model)
 			if createErr != nil {
@@ -446,12 +653,19 @@ func main() {
 		thinkingLevel = repository.Thinking()
 	}
 	runner.SetThinking = func(level string) error {
-		switch strings.ToLower(strings.TrimSpace(level)) {
-		case "off", "minimal", "low", "medium", "high":
+		level = strings.ToLower(strings.TrimSpace(level))
+		switch level {
+		case "off", "minimal", "low", "medium", "high", "xhigh", "max":
 		default:
 			return fmt.Errorf("unsupported thinking level %q", level)
 		}
-		thinkingLevel = strings.ToLower(strings.TrimSpace(level))
+		thinkingLevel = level
+		cfg.Thinking = level
+		if runner.Loop != nil && runner.Loop.Provider != nil {
+			if thinkingProvider, ok := runner.Loop.Provider.(provider.ThinkingProvider); ok {
+				thinkingProvider.SetThinking(level)
+			}
+		}
 		if repository != nil {
 			return repository.AppendThinking(thinkingLevel)
 		}
@@ -481,18 +695,149 @@ func main() {
 		}
 		runner.Transcript = append([]agent.Message{{Role: "system", Content: "Previous conversation summary:\n" + summary}}, runner.Transcript[len(runner.Transcript)-keep:]...)
 		if repository != nil {
-			return repository.AppendCompaction(summary)
+			firstKept := repository.FirstRetainedMessageID(keep)
+			return repository.AppendCompactionAt(summary, firstKept, 0)
 		}
 		return nil
+	}
+	if opts.Mode == cli.ModeRPC {
+		if runner.Loop == nil || runner.Loop.Provider == nil {
+			if loopStartupErr != nil {
+				fatal(loopStartupErr.Error())
+			}
+			fatal(startupConfigurationError(cfg))
+		}
+		var rpcServer *rpc.Server
+		rpcServer = &rpc.Server{
+			Loop:       runner.Loop,
+			Transcript: runner.Transcript,
+			Models:     models.Catalog(),
+			Persist:    runner.Persist,
+			SetModel: func(providerID, modelID string) error {
+				if err := runner.SelectModel(providerID, modelID); err != nil {
+					return err
+				}
+				rpcServer.Loop = runner.Loop
+				return nil
+			},
+			SetThinking: runner.SetThinking,
+			NewSession:  runner.NewSession,
+			SwitchSession: func(path string) ([]agent.Message, error) {
+				if runner.SelectSession == nil {
+					return nil, fmt.Errorf("session switching is unavailable")
+				}
+				return runner.SelectSession(path)
+			},
+			ForkSession: func(entryID string) ([]agent.Message, error) {
+				if entryID != "" && repository != nil {
+					if err := repository.Branch(strings.TrimSpace(entryID)); err != nil {
+						return nil, err
+					}
+				}
+				if runner.ForkSession == nil {
+					return nil, fmt.Errorf("session fork is unavailable")
+				}
+				return runner.ForkSession(true)
+			},
+			CloneSession: func() ([]agent.Message, error) {
+				if runner.ForkSession == nil {
+					return nil, fmt.Errorf("session clone is unavailable")
+				}
+				return runner.ForkSession(false)
+			},
+			SetName: runner.SetName,
+			Compact: func(_ string) error {
+				if runner.Compact == nil {
+					return fmt.Errorf("context compaction is unavailable")
+				}
+				return runner.Compact()
+			},
+			Shell: runner.Shell,
+			Tree: func() []rpc.TreeNode {
+				if repository == nil {
+					return nil
+				}
+				items := repository.TreeItems()
+				out := make([]rpc.TreeNode, 0, len(items))
+				for _, item := range items {
+					out = append(out, rpc.TreeNode{ID: item.ID, Label: item.Label, Depth: item.Depth, Active: item.Active})
+				}
+				return out
+			},
+			Entries: func() any {
+				if repository == nil {
+					return []session.Entry{}
+				}
+				return repository.Entries()
+			},
+			State: func() rpc.State {
+				state := rpc.State{Provider: cfg.Provider, Model: cfg.Model, ThinkingLevel: thinkingLevel, MessageCount: len(runner.Transcript)}
+				if repository != nil {
+					state.SessionFile = repository.Path()
+					state.SessionID = repository.Header().ID
+					state.SessionName = repository.Name()
+				}
+				return state
+			},
+		}
+		if err := rpcServer.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
+			fatal(err.Error())
+		}
+		return
 	}
 	if err := runner.Run(context.Background()); err != nil {
 		fatal(err.Error())
 	}
 }
+func appendFileArguments(workdir, prompt string, files []string) (string, error) {
+	var b strings.Builder
+	if strings.TrimSpace(prompt) != "" {
+		b.WriteString(strings.TrimSpace(prompt))
+	}
+	for _, name := range files {
+		path := resolvePath(workdir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read prompt file %s: %w", name, err)
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "<file path=\"%s\">\n%s\n</file>", filepath.ToSlash(name), data)
+	}
+	return strings.TrimSpace(b.String()), nil
+}
+func resolvePath(workdir, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return workdir
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(workdir, value)
+	}
+	return filepath.Clean(value)
+}
+func writeJSONEvent(event agent.Event) {
+	payload, err := json.Marshal(map[string]any{"type": event.Type, "detail": event.Detail})
+	if err == nil {
+		fmt.Println(string(payload))
+	}
+}
+
+func writeJSONResult(answer, model string) {
+	payload, err := json.Marshal(map[string]any{"type": "result", "answer": answer, "model": model})
+	if err == nil {
+		fmt.Println(string(payload))
+	}
+}
+
 func normalizeLongOptions(args []string) []string {
 	out := append([]string(nil), args...)
 	for i, arg := range out {
-		if strings.HasPrefix(arg, "--") && arg != "--" {
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "--") {
 			out[i] = "-" + strings.TrimPrefix(arg, "--")
 		}
 	}
@@ -511,7 +856,11 @@ func startupNotice(cfg config.Config) string {
 		return "No model selected. Use -provider <provider> -model <model-id> to start a model session."
 	}
 	if cfg.APIKey == "" {
-		return fmt.Sprintf("No API key found for %s. Set its environment variable or pass -api-key, then restart Piapple.", cfg.Provider)
+		envNames := config.APIKeyEnvironmentNames(cfg.Provider)
+		if len(envNames) > 0 {
+			return fmt.Sprintf("No API key found for %s. Set %s, use /login %s, or pass -api-key.", cfg.Provider, strings.Join(envNames, " or "), cfg.Provider)
+		}
+		return fmt.Sprintf("No API key found for %s. Use /login %s or pass -api-key.", cfg.Provider, cfg.Provider)
 	}
 	return ""
 }

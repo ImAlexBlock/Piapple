@@ -2,47 +2,81 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
 	"github.com/ImAlexBlock/Piapple/internal/commands"
 	"github.com/ImAlexBlock/Piapple/internal/models"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
+type SessionChoice struct {
+	Path   string
+	Label  string
+	Detail string
+}
+
+type TreeChoice struct {
+	ID     string
+	Label  string
+	Depth  int
+	Active bool
+}
+
 type Runner struct {
-	Loop          *agent.Loop
-	In            io.Reader
-	Out           io.Writer
-	Transcript    []agent.Message
-	Persist       func([]agent.Message) error
-	Notice        string
-	Shell         func(context.Context, string) (string, error)
-	Login         func(provider, key string) error
-	Logout        func(provider string) error
-	SelectModel   func(provider, model string) error
-	ModelOptions  []models.Model
-	SessionInfo   func() string
-	SetName       func(string) error
-	NewSession    func() error
-	SessionTree   func() string
-	ExportSession func(string) error
-	ImportSession func(string) ([]agent.Message, error)
-	ResumeSession func(string) ([]agent.Message, error)
-	ListSessions  func() string
-	ForkSession   func(bool) ([]agent.Message, error)
-	SetThinking   func(string) error
-	Compact       func() error
-	SettingsView  func() string
-	Reload        func() error
+	Loop              *agent.Loop
+	In                io.Reader
+	Out               io.Writer
+	Transcript        []agent.Message
+	Persist           func([]agent.Message) error
+	Notice            string
+	Shell             func(context.Context, string) (string, error)
+	Login             func(provider, key string) error
+	Logout            func(provider string) error
+	SelectModel       func(provider, model string) error
+	ModelOptions      []models.Model
+	SessionInfo       func() string
+	SetName           func(string) error
+	NewSession        func() error
+	SessionTree       func() string
+	ExportSession     func(string) error
+	ImportSession     func(string) ([]agent.Message, error)
+	ResumeSession     func(string) ([]agent.Message, error)
+	ListSessions      func() string
+	SessionOptions    func() []SessionChoice
+	SelectSession     func(string) ([]agent.Message, error)
+	TreeOptions       func() []TreeChoice
+	SelectTreeEntry   func(string) ([]agent.Message, error)
+	CopyText          func(string) error
+	ForkSession       func(bool) ([]agent.Message, error)
+	SetThinking       func(string) error
+	Compact           func() error
+	SettingsView      func() string
+	Reload            func() error
+	OpenSessionPicker bool
+	CurrentModel      func() string
+	CurrentThinking   func() string
+	Fullscreen        bool
+
+	// bindLoop is installed for the lifetime of Run. Model/session commands can
+	// replace Runner.Loop; keeping the event sink attached to the active loop is
+	// what makes streaming continue after /model, /resume, /tree, or /reload.
+	bindLoop func(*agent.Loop)
 }
 type resultMsg struct {
-	messages []agent.Message
-	answer   string
-	err      error
+	messages       []agent.Message
+	answer         string
+	err            error
+	renderFrom     int
+	renderAgent    bool
+	renderedAnswer bool
 }
 type eventMsg struct{ event agent.Event }
 type model struct {
@@ -58,9 +92,14 @@ type model struct {
 	scroll        int
 	follow        bool
 	streaming     string
+	reasoning     string
 	usage         *agent.Usage
 	picker        bool
 	pickerIndex   int
+	sessionPicker bool
+	sessionIndex  int
+	treePicker    bool
+	treeIndex     int
 	commandIndex  int
 	loginProvider string
 	width, height int
@@ -89,19 +128,68 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.Notice != "" {
 		initialLines = append(initialLines, r.Notice)
 	}
+	initialLines = append(initialLines, renderTranscript(r.Transcript)...)
 	m := &model{runner: r, ctx: ctx, historyPos: -1, follow: true, lines: initialLines}
-	program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	previousSink := r.Loop.OnEvent
-	r.Loop.OnEvent = func(event agent.Event) {
-		if previousSink != nil {
-			previousSink(event)
-		}
-		program.Send(eventMsg{event: event})
+	if r.OpenSessionPicker && r.SessionOptions != nil && len(r.SessionOptions()) > 0 {
+		m.sessionPicker = true
 	}
-	defer func() { r.Loop.OnEvent = previousSink }()
+	programOptions := []tea.ProgramOption{tea.WithMouseCellMotion()}
+	if r.Fullscreen {
+		programOptions = append(programOptions, tea.WithAltScreen())
+	}
+	program := tea.NewProgram(m, programOptions...)
+	var restoreSink func()
+	r.bindLoop = func(loop *agent.Loop) {
+		if restoreSink != nil {
+			restoreSink()
+			restoreSink = nil
+		}
+		if loop != nil {
+			restoreSink = loop.SetEventSink(func(event agent.Event) {
+				program.Send(eventMsg{event: event})
+			})
+		}
+	}
+	r.bindLoop(r.Loop)
+	defer func() {
+		r.bindLoop = nil
+		if restoreSink != nil {
+			restoreSink()
+		}
+	}()
 	_, err := program.Run()
 	return err
 }
+
+func (r *Runner) syncLoop() {
+	if r != nil && r.bindLoop != nil {
+		r.bindLoop(r.Loop)
+	}
+}
+func renderTranscript(messages []agent.Message) []string {
+	lines := make([]string, 0, len(messages)*2)
+	for _, message := range messages {
+		switch message.Role {
+		case "user":
+			lines = append(lines, userStyle.Render("you")+"\n"+wrap(message.Content, 76))
+		case "assistant":
+			if message.Reasoning != "" {
+				lines = append(lines, dimStyle.Render("thinking")+"\n"+wrap(message.Reasoning, 76))
+			}
+			if message.Content != "" {
+				lines = append(lines, titleStyle.Render("assistant")+"\n"+wrap(message.Content, 76))
+			}
+		case "tool", "toolResult":
+			lines = append(lines, toolStyle.Render("tool result")+"\n"+wrap(message.Content, 76))
+		case "bashExecution":
+			lines = append(lines, toolStyle.Render("$ "+message.Command)+"\n"+wrap(message.Content, 76))
+		case "system":
+			lines = append(lines, dimStyle.Render(message.Content))
+		}
+	}
+	return lines
+}
+
 func (m *model) Init() tea.Cmd { return nil }
 func (m *model) emit(line string) {
 	m.lines = append(m.lines, wrap(line, m.contentWidth()))
@@ -117,25 +205,17 @@ func wrap(text string, width int) string {
 	if width < 1 {
 		return text
 	}
-	var out []string
-	for _, paragraph := range strings.Split(text, "\n") {
-		if paragraph == "" {
-			out = append(out, "")
-			continue
-		}
-		for len([]rune(paragraph)) > width {
-			r := []rune(paragraph)
-			out = append(out, string(r[:width]))
-			paragraph = string(r[width:])
-		}
-		out = append(out, paragraph)
-	}
-	return strings.Join(out, "\n")
+	// Hardwrap understands ANSI escape sequences emitted by lipgloss. Counting
+	// those bytes as runes made a resized transcript overflow into the footer.
+	return ansi.Hardwrap(text, width, false)
 }
 func (m *model) allContentLines() []string {
 	var out []string
 	for _, line := range m.lines {
-		out = append(out, strings.Split(line, "\n")...)
+		out = append(out, strings.Split(wrap(line, m.contentWidth()), "\n")...)
+	}
+	if m.reasoning != "" {
+		out = append(out, wrap(dimStyle.Render("thinking: "+m.reasoning), m.contentWidth()))
 	}
 	if m.streaming != "" {
 		out = append(out, wrap(userStyle.Render(m.streaming), m.contentWidth()))
@@ -192,8 +272,10 @@ func (m *model) commandSuggestionView(width int) string {
 	if m.commandIndex < 0 {
 		m.commandIndex = 0
 	}
+	start, end := pickerWindow(m.commandIndex, len(items))
 	var b strings.Builder
-	for i, item := range items {
+	for i := start; i < end; i++ {
+		item := items[i]
 		line := "  /" + item.Name
 		if item.ArgumentHint != "" {
 			line += " " + hintStyle.Render(item.ArgumentHint)
@@ -203,13 +285,18 @@ func (m *model) commandSuggestionView(width int) string {
 			line = commandStyle.Render("›") + line[1:]
 		}
 		b.WriteString(line)
-		if i+1 < len(items) {
+		if i+1 < end {
 			b.WriteByte('\n')
 		}
 	}
+	if start > 0 {
+		b.WriteString("\n" + hintStyle.Render("… more commands above"))
+	}
+	if end < len(items) {
+		b.WriteString("\n" + hintStyle.Render("… more commands below"))
+	}
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#7E57C2")).Padding(0, 1).Width(width - 2).Render(b.String())
 }
-
 func (m *model) commandSuggestionHeight(width int) int {
 	if len(m.commandSuggestions()) == 0 {
 		return 0
@@ -217,11 +304,35 @@ func (m *model) commandSuggestionHeight(width int) int {
 	return lipgloss.Height(m.commandSuggestionView(width)) + 1
 }
 
+const pickerVisibleRows = 8
+
+func pickerWindow(index, total int) (start, end int) {
+	if total <= 0 {
+		return 0, 0
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index >= total {
+		index = total - 1
+	}
+	start = (index / pickerVisibleRows) * pickerVisibleRows
+	end = start + pickerVisibleRows
+	if end > total {
+		end = total
+	}
+	return start, end
+}
+
 func (m *model) pickerHeight() int {
 	if !m.picker {
 		return 0
 	}
-	return len(m.runner.ModelOptions) + 2
+	total := len(m.runner.ModelOptions)
+	if total > pickerVisibleRows {
+		total = pickerVisibleRows
+	}
+	return total + 2
 }
 
 func (m *model) pickerView(width int) string {
@@ -230,7 +341,9 @@ func (m *model) pickerView(width int) string {
 	}
 	var b strings.Builder
 	b.WriteString(commandStyle.Render("Select model") + " " + hintStyle.Render("↑↓ navigate  Enter select  Esc cancel") + "\n")
-	for i, item := range m.runner.ModelOptions {
+	start, end := pickerWindow(m.pickerIndex, len(m.runner.ModelOptions))
+	for i := start; i < end; i++ {
+		item := m.runner.ModelOptions[i]
 		line := "  " + item.Ref()
 		if item.Name != "" && item.Name != item.ID {
 			line += "  " + dimStyle.Render(item.Name)
@@ -239,16 +352,114 @@ func (m *model) pickerView(width int) string {
 			line = commandStyle.Render("›") + " " + line[2:]
 		}
 		b.WriteString(line)
-		if i+1 < len(m.runner.ModelOptions) {
+		if i+1 < end {
 			b.WriteByte('\n')
 		}
+	}
+	if start > 0 {
+		b.WriteString("\n" + hintStyle.Render("… more models above"))
+	}
+	if end < len(m.runner.ModelOptions) {
+		b.WriteString("\n" + hintStyle.Render("… more models below"))
 	}
 	return b.String()
 }
 
+func (m *model) sessionPickerView(width int) string {
+	if !m.sessionPicker || m.runner.SessionOptions == nil {
+		return ""
+	}
+	items := m.runner.SessionOptions()
+	if len(items) == 0 {
+		return hintStyle.Render("No sessions found")
+	}
+	if m.sessionIndex >= len(items) {
+		m.sessionIndex = len(items) - 1
+	}
+	var b strings.Builder
+	b.WriteString(commandStyle.Render("Resume session") + " " + hintStyle.Render("↑↓ navigate  Enter select  Esc cancel") + "\n")
+	start, end := pickerWindow(m.sessionIndex, len(items))
+	for i := start; i < end; i++ {
+		item := items[i]
+		label := item.Label
+		if label == "" {
+			label = item.Path
+		}
+		line := "  " + label
+		if item.Detail != "" {
+			line += "  " + dimStyle.Render(item.Detail)
+		}
+		if i == m.sessionIndex {
+			line = commandStyle.Render("›") + " " + line[2:]
+		}
+		b.WriteString(line)
+		if i+1 < end {
+			b.WriteByte('\n')
+		}
+	}
+	if start > 0 {
+		b.WriteString("\n" + hintStyle.Render("… more sessions above"))
+	}
+	if end < len(items) {
+		b.WriteString("\n" + hintStyle.Render("… more sessions below"))
+	}
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#7E57C2")).Padding(0, 1).Width(width - 2).Render(b.String())
+}
+
+func (m *model) treePickerView(width int) string {
+	if !m.treePicker || m.runner.TreeOptions == nil {
+		return ""
+	}
+	items := m.runner.TreeOptions()
+	if len(items) == 0 {
+		return hintStyle.Render("Session tree is empty")
+	}
+	if m.treeIndex >= len(items) {
+		m.treeIndex = len(items) - 1
+	}
+	var b strings.Builder
+	b.WriteString(commandStyle.Render("Session tree") + " " + hintStyle.Render("↑↓ navigate  Enter switch  Esc cancel") + "\n")
+	start, end := pickerWindow(m.treeIndex, len(items))
+	for i := start; i < end; i++ {
+		item := items[i]
+		indent := strings.Repeat("  ", item.Depth)
+		line := indent + "  " + item.Label
+		if item.Active {
+			line += "  " + readyStyle.Render("active")
+		}
+		if i == m.treeIndex {
+			line = indent + commandStyle.Render("›") + " " + strings.TrimSpace(strings.TrimPrefix(line, indent))
+		}
+		b.WriteString(line)
+		if i+1 < end {
+			b.WriteByte('\n')
+		}
+	}
+	if start > 0 {
+		b.WriteString("\n" + hintStyle.Render("… more entries above"))
+	}
+	if end < len(items) {
+		b.WriteString("\n" + hintStyle.Render("… more entries below"))
+	}
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#7E57C2")).Padding(0, 1).Width(width - 2).Render(b.String())
+}
+
+func (m *model) sessionPickerHeight(width int) int {
+	if !m.sessionPicker {
+		return 0
+	}
+	return lipgloss.Height(m.sessionPickerView(width)) + 1
+}
+
+func (m *model) treePickerHeight(width int) int {
+	if !m.treePicker {
+		return 0
+	}
+	return lipgloss.Height(m.treePickerView(width)) + 1
+}
 func (m *model) composerHeight(width int) int {
 	boxHeight := lipgloss.Height(m.composerBox(width))
-	return boxHeight + 2 + m.pickerHeight() + m.commandSuggestionHeight(width) // picker, suggestions, status and shortcut rows
+	return boxHeight + 2 + m.pickerHeight() + m.sessionPickerHeight(width) + m.treePickerHeight(width) + m.commandSuggestionHeight(width) // overlays, status and shortcut rows
 }
 
 func (m *model) composerView(width int) string {
@@ -256,17 +467,65 @@ func (m *model) composerView(width int) string {
 	if m.busy {
 		status = toolStyle.Render("● working") + hintStyle.Render("  model and tools are running")
 	}
+	meta := []string{status}
+	if m.runner.CurrentModel != nil {
+		if value := strings.TrimSpace(m.runner.CurrentModel()); value != "" {
+			meta = append(meta, titleStyle.Render(value))
+		}
+	}
+	if m.runner.CurrentThinking != nil {
+		if value := strings.TrimSpace(m.runner.CurrentThinking()); value != "" {
+			meta = append(meta, hintStyle.Render("thinking: "+value))
+		}
+	}
+	if m.usage != nil && (m.usage.InputTokens > 0 || m.usage.OutputTokens > 0 || m.usage.TotalTokens > 0) {
+		meta = append(meta, footerStyle.Render(fmt.Sprintf("tokens in:%d out:%d", m.usage.InputTokens, m.usage.OutputTokens)))
+	}
 	shortcuts := strings.Join([]string{
 		keyHint("Enter", "send"), keyHint("Alt+Enter", "newline"), keyHint("↑↓", "history"),
-		keyHint("PgUp/PgDn", "scroll"), keyHint("Ctrl+C", "cancel / exit"), keyHint("Ctrl+L", "clear view"),
+		keyHint("PgUp/PgDn", "scroll"), keyHint("Ctrl+P", "cycle model"), keyHint("Ctrl+C", "cancel / exit"), keyHint("Ctrl+L", "clear view"),
 	}, "  ")
-	return m.composerBox(width) + "\n" + status + "\n" + footerStyle.Render(shortcuts+"  "+commandStyle.Render("/help"))
+	return m.composerBox(width) + "\n" + strings.Join(meta, "  ") + "\n" + footerStyle.Render(shortcuts+"  "+commandStyle.Render("/help"))
+}
+
+func (m *model) cycleModel(delta int) {
+	if m.busy || len(m.runner.ModelOptions) == 0 {
+		return
+	}
+	current := ""
+	if m.runner.CurrentModel != nil {
+		current = strings.TrimSpace(m.runner.CurrentModel())
+	}
+	index := -1
+	for i, item := range m.runner.ModelOptions {
+		if item.Ref() == current {
+			index = i
+			break
+		}
+	}
+	if delta == 0 {
+		delta = 1
+	}
+	index = (index + delta) % len(m.runner.ModelOptions)
+	if index < 0 {
+		index += len(m.runner.ModelOptions)
+	}
+	item := m.runner.ModelOptions[index]
+	if err := m.selectModel(item.Provider, item.ID); err != nil {
+		m.emit("Model selection failed: " + err.Error())
+		return
+	}
+	m.emit("Selected " + item.Ref())
 }
 func (m *model) selectModel(providerID, modelID string) error {
 	if m.runner.SelectModel == nil {
 		return fmt.Errorf("model selection is unavailable")
 	}
-	return m.runner.SelectModel(providerID, modelID)
+	if err := m.runner.SelectModel(providerID, modelID); err != nil {
+		return err
+	}
+	m.runner.syncLoop()
+	return nil
 }
 
 func (m *model) selectPickedModel() tea.Cmd {
@@ -279,6 +538,60 @@ func (m *model) selectPickedModel() tea.Cmd {
 		m.emit("Model selection failed: " + err.Error())
 	} else {
 		m.emit("Selected " + item.Ref())
+	}
+	return nil
+}
+
+func (m *model) selectSession() tea.Cmd {
+	if !m.sessionPicker || m.runner.SelectSession == nil {
+		return nil
+	}
+	items := m.runner.SessionOptions()
+	if len(items) == 0 {
+		m.sessionPicker = false
+		return nil
+	}
+	if m.sessionIndex >= len(items) {
+		m.sessionIndex = len(items) - 1
+	}
+	path := items[m.sessionIndex].Path
+	m.sessionPicker = false
+	messages, err := m.runner.SelectSession(path)
+	if err != nil {
+		m.emit("Resume failed: " + err.Error())
+	} else {
+		m.runner.syncLoop()
+		m.runner.Transcript = messages
+		m.lines = renderTranscript(messages)
+		m.scroll = 0
+		m.emit(fmt.Sprintf("Resumed %d messages.", len(messages)))
+	}
+	return nil
+}
+
+func (m *model) selectTreeEntry() tea.Cmd {
+	if !m.treePicker || m.runner.SelectTreeEntry == nil {
+		return nil
+	}
+	items := m.runner.TreeOptions()
+	if len(items) == 0 {
+		m.treePicker = false
+		return nil
+	}
+	if m.treeIndex >= len(items) {
+		m.treeIndex = len(items) - 1
+	}
+	id := items[m.treeIndex].ID
+	m.treePicker = false
+	messages, err := m.runner.SelectTreeEntry(id)
+	if err != nil {
+		m.emit("Tree selection failed: " + err.Error())
+	} else {
+		m.runner.syncLoop()
+		m.runner.Transcript = messages
+		m.lines = renderTranscript(messages)
+		m.scroll = 0
+		m.emit(fmt.Sprintf("Switched to %d messages.", len(messages)))
 	}
 	return nil
 }
@@ -384,15 +697,28 @@ func (m *model) submit() tea.Cmd {
 		}
 		m.emit(toolStyle.Render("$ ") + command)
 		m.busy = true
+		before := len(m.runner.Transcript)
 		return func() tea.Msg {
 			output, err := m.runner.Shell(m.ctx, command)
-			if err != nil {
-				return resultMsg{err: err}
+			var exitCode *int
+			if err == nil {
+				code := 0
+				exitCode = &code
+			} else {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
+					code := exitErr.ExitCode()
+					exitCode = &code
+				}
 			}
-			if !excluded {
-				m.runner.Transcript = append(m.runner.Transcript, agent.Message{Role: "user", Content: "Shell command: " + command + "\n" + output})
+			message := agent.Message{Role: "bashExecution", Command: command, Content: output, ExitCode: exitCode, Cancelled: errors.Is(m.ctx.Err(), context.Canceled), ExcludeFromContext: excluded, Timestamp: time.Now().UnixMilli()}
+			m.runner.Transcript = append(m.runner.Transcript, message)
+			if m.runner.Persist != nil {
+				if persistErr := m.runner.Persist([]agent.Message{message}); persistErr != nil {
+					return resultMsg{messages: m.runner.Transcript, answer: output, err: persistErr, renderFrom: before}
+				}
 			}
-			return resultMsg{messages: m.runner.Transcript, answer: output}
+			return resultMsg{messages: m.runner.Transcript, answer: output, err: err, renderFrom: before}
 		}
 	}
 	if command, ok := commands.Parse(text); ok {
@@ -407,6 +733,15 @@ func (m *model) submit() tea.Cmd {
 			return nil
 		case "quit", "exit":
 			return tea.Quit
+		case "hotkeys":
+			m.emit("Enter send | Alt+Enter newline | ↑↓ history | PgUp/PgDn scroll | Ctrl+C cancel/exit | Ctrl+L clear view | /help commands")
+			return nil
+		case "changelog":
+			m.emit("Piapple follows Pi's core agent loop, provider streaming, session tree, tools, and fixed-composer TUI. Plugin runtime is intentionally excluded.")
+			return nil
+		case "scoped-models":
+			m.emit("Model cycling scope is the built-in catalog; use /model <provider/model> for any compatible model.")
+			return nil
 		case "settings":
 			if m.runner.SettingsView == nil {
 				m.emit("Settings are unavailable.")
@@ -420,6 +755,7 @@ func (m *model) submit() tea.Cmd {
 			} else if err := m.runner.Reload(); err != nil {
 				m.emit("Reload failed: " + err.Error())
 			} else {
+				m.runner.syncLoop()
 				m.emit("Reloaded settings and project instructions.")
 			}
 			return nil
@@ -444,6 +780,25 @@ func (m *model) submit() tea.Cmd {
 			}
 			return nil
 		case "tree":
+			if strings.TrimSpace(command.Arguments) != "" && m.runner.SelectTreeEntry != nil {
+				messages, err := m.runner.SelectTreeEntry(strings.TrimSpace(command.Arguments))
+				if err != nil {
+					m.emit("Tree selection failed: " + err.Error())
+				} else {
+					m.runner.syncLoop()
+					m.runner.Transcript = messages
+					m.lines = renderTranscript(messages)
+					m.scroll = 0
+					m.emit(fmt.Sprintf("Switched to %d messages.", len(messages)))
+				}
+				return nil
+			}
+			if m.runner.TreeOptions != nil {
+				if items := m.runner.TreeOptions(); len(items) > 0 {
+					m.treePicker, m.treeIndex = true, 0
+					return nil
+				}
+			}
 			if m.runner.SessionTree == nil {
 				m.emit("Session tree is unavailable.")
 			} else {
@@ -484,13 +839,21 @@ func (m *model) submit() tea.Cmd {
 			if err != nil {
 				m.emit("Import failed: " + err.Error())
 			} else {
+				m.runner.syncLoop()
 				m.runner.Transcript = messages
+				m.lines = renderTranscript(messages)
 				m.emit(fmt.Sprintf("Imported %d messages.", len(messages)))
 			}
 			return nil
 		case "resume":
 			path := strings.TrimSpace(command.Arguments)
 			if path == "" {
+				if m.runner.SessionOptions != nil && m.runner.SelectSession != nil {
+					if items := m.runner.SessionOptions(); len(items) > 0 {
+						m.sessionPicker, m.sessionIndex = true, 0
+						return nil
+					}
+				}
 				if m.runner.ListSessions == nil {
 					m.emit("Usage: /resume <session.jsonl>")
 				} else {
@@ -510,8 +873,9 @@ func (m *model) submit() tea.Cmd {
 			if err != nil {
 				m.emit("Resume failed: " + err.Error())
 			} else {
+				m.runner.syncLoop()
 				m.runner.Transcript = messages
-				m.lines = nil
+				m.lines = renderTranscript(messages)
 				m.scroll = 0
 				m.emit(fmt.Sprintf("Resumed %d messages.", len(messages)))
 			}
@@ -525,8 +889,9 @@ func (m *model) submit() tea.Cmd {
 			if err != nil {
 				m.emit("Session branch failed: " + err.Error())
 			} else {
+				m.runner.syncLoop()
 				m.runner.Transcript = messages
-				m.lines = nil
+				m.lines = renderTranscript(messages)
 				m.scroll = 0
 				m.emit(fmt.Sprintf("Created %s session.", command.Name))
 			}
@@ -605,6 +970,26 @@ func (m *model) submit() tea.Cmd {
 				m.emit(m.runner.SessionInfo())
 			}
 			return nil
+		case "copy":
+			var content string
+			for i := len(m.runner.Transcript) - 1; i >= 0; i-- {
+				if m.runner.Transcript[i].Role == "assistant" && m.runner.Transcript[i].Content != "" {
+					content = m.runner.Transcript[i].Content
+					break
+				}
+			}
+			if content == "" {
+				m.emit("No assistant message to copy.")
+				return nil
+			}
+			if m.runner.CopyText == nil {
+				m.emit("Clipboard is unavailable.")
+			} else if err := m.runner.CopyText(content); err != nil {
+				m.emit("Copy failed: " + err.Error())
+			} else {
+				m.emit("Copied the last assistant message.")
+			}
+			return nil
 		case "name":
 			name := strings.TrimSpace(command.Arguments)
 			if name == "" {
@@ -667,7 +1052,7 @@ func (m *model) submit() tea.Cmd {
 		if err == nil && m.runner.Persist != nil {
 			err = m.runner.Persist(next[before:])
 		}
-		return resultMsg{messages: next, answer: answer, err: err}
+		return resultMsg{messages: next, answer: answer, err: err, renderFrom: before, renderAgent: true}
 	}
 }
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -675,7 +1060,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = v.Width, v.Height
 	case eventMsg:
-		if v.event.Type == "model_delta" {
+		if v.event.Type == "reasoning_delta" {
+			m.reasoning += v.event.Detail
+			m.follow = true
+		} else if v.event.Type == "model_delta" {
 			m.streaming += v.event.Detail
 			m.follow = true
 		} else if v.event.Type == "tool_start" {
@@ -685,12 +1073,45 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case resultMsg:
 		m.streaming = ""
+		m.reasoning = ""
 		m.busy = false
 		m.cancel = nil
 		m.runner.Transcript = v.messages
+		if v.renderAgent {
+			start := v.renderFrom
+			if start < 0 {
+				start = 0
+			}
+			if start > len(v.messages) {
+				start = len(v.messages)
+			}
+			for _, message := range v.messages[start:] {
+				// The user message is rendered synchronously when submit() is
+				// called. Assistant/tool messages are appended here so tool
+				// results remain visible after the streaming status disappears.
+				if message.Role == "user" || message.Role == "system" {
+					continue
+				}
+				if rendered := renderTranscript([]agent.Message{message}); len(rendered) > 0 {
+					m.lines = append(m.lines, rendered...)
+				}
+				if message.Role == "assistant" && (message.Content != "" || message.Reasoning != "") {
+					v.renderedAnswer = true
+				}
+			}
+			m.follow = true
+		}
+
+		for i := len(v.messages) - 1; i >= 0; i-- {
+			if v.messages[i].Role == "assistant" && v.messages[i].Usage != nil {
+				m.usage = v.messages[i].Usage
+				break
+			}
+		}
 		if v.err != nil {
 			m.emit("error: " + v.err.Error())
-		} else {
+		}
+		if v.answer != "" && !v.renderedAnswer {
 			m.emit(v.answer)
 		}
 	case tea.MouseMsg:
@@ -706,6 +1127,44 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.KeyMsg:
+		if m.sessionPicker {
+			switch v.String() {
+			case "esc", "ctrl+c":
+				m.sessionPicker = false
+			case "up":
+				if m.sessionIndex > 0 {
+					m.sessionIndex--
+				}
+			case "down":
+				if m.runner.SessionOptions != nil {
+					if n := len(m.runner.SessionOptions()); m.sessionIndex < n-1 {
+						m.sessionIndex++
+					}
+				}
+			case "enter":
+				return m, m.selectSession()
+			}
+			return m, nil
+		}
+		if m.treePicker {
+			switch v.String() {
+			case "esc", "ctrl+c":
+				m.treePicker = false
+			case "up":
+				if m.treeIndex > 0 {
+					m.treeIndex--
+				}
+			case "down":
+				if m.runner.TreeOptions != nil {
+					if n := len(m.runner.TreeOptions()); m.treeIndex < n-1 {
+						m.treeIndex++
+					}
+				}
+			case "enter":
+				return m, m.selectTreeEntry()
+			}
+			return m, nil
+		}
 		if m.picker {
 			switch v.String() {
 			case "esc", "ctrl+c":
@@ -742,6 +1201,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		switch v.String() {
+		case "ctrl+p":
+			m.cycleModel(1)
 		case "ctrl+c":
 			if m.loginProvider != "" {
 				m.loginProvider = ""
@@ -892,8 +1353,16 @@ func (m *model) View() string {
 	}
 	b.WriteString(strings.Repeat("─", width))
 	b.WriteByte('\n')
-	if suggestions := m.commandSuggestionView(width); suggestions != "" && !m.picker {
+	if suggestions := m.commandSuggestionView(width); suggestions != "" && !m.picker && !m.sessionPicker && !m.treePicker {
 		b.WriteString(suggestions)
+		b.WriteByte('\n')
+	}
+	if m.sessionPicker {
+		b.WriteString(m.sessionPickerView(width))
+		b.WriteByte('\n')
+	}
+	if m.treePicker {
+		b.WriteString(m.treePickerView(width))
 		b.WriteByte('\n')
 	}
 	if m.picker {

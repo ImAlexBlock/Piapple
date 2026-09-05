@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/ImAlexBlock/Piapple/internal/agent"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,16 +26,19 @@ type Header struct {
 	ParentSession string `json:"parentSession,omitempty"`
 }
 type Entry struct {
-	Type      string         `json:"type"`
-	ID        string         `json:"id"`
-	ParentID  *string        `json:"parentId"`
-	Timestamp string         `json:"timestamp"`
-	Message   *agent.Message `json:"message,omitempty"`
-	Provider  string         `json:"provider,omitempty"`
-	ModelID   string         `json:"modelId,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Thinking  string         `json:"thinkingLevel,omitempty"`
-	Summary   string         `json:"summary,omitempty"`
+	Type             string         `json:"type"`
+	ID               string         `json:"id"`
+	ParentID         *string        `json:"parentId"`
+	Timestamp        string         `json:"timestamp"`
+	Message          *agent.Message `json:"message,omitempty"`
+	Provider         string         `json:"provider,omitempty"`
+	ModelID          string         `json:"modelId,omitempty"`
+	Name             string         `json:"name,omitempty"`
+	Thinking         string         `json:"thinkingLevel,omitempty"`
+	Summary          string         `json:"summary,omitempty"`
+	FirstKeptEntryID string         `json:"firstKeptEntryId,omitempty"`
+	TokensBefore     int            `json:"tokensBefore,omitempty"`
+	FromID           string         `json:"fromId,omitempty"`
 }
 type Repository struct {
 	path    string
@@ -54,8 +59,8 @@ type Summary struct {
 
 func newID() string { b := make([]byte, 8); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 func DefaultDirectory(home, cwd string) string {
-	clean := strings.ReplaceAll(filepath.Clean(cwd), ":", "")
-	clean = strings.NewReplacer("\\", "-", "/", "-").Replace(clean)
+	clean := strings.TrimLeft(filepath.Clean(cwd), `/\`)
+	clean = strings.NewReplacer("\\", "-", "/", "-", ":", "-").Replace(clean)
 	return filepath.Join(home, ".pi", "agent", "sessions", "--"+clean+"--")
 }
 func Create(dir, cwd string) (*Repository, error) {
@@ -80,25 +85,66 @@ func Open(path string) (*Repository, error) {
 		return nil, err
 	}
 	defer f.Close()
-	dec := json.NewDecoder(f)
+	decoder := json.NewDecoder(f)
 	var h Header
-	if err = dec.Decode(&h); err != nil {
+	if err = decoder.Decode(&h); err != nil {
 		return nil, err
 	}
 	if h.Type != "session" {
 		return nil, fmt.Errorf("session header missing")
 	}
 	r := &Repository{path: path, header: h}
-	for dec.More() {
-		var e Entry
-		if err = dec.Decode(&e); err != nil {
+	for {
+		var entry Entry
+		err = decoder.Decode(&entry)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
 			return nil, err
 		}
-		r.entries = append(r.entries, e)
+		if entry.Type == "session" {
+			continue
+		}
+		if entry.ID == "" {
+			entry.ID = newID()
+		}
+		r.entries = append(r.entries, entry)
 		r.leaf = &r.entries[len(r.entries)-1].ID
 	}
+	r.migrate()
 	return r, nil
 }
+func (r *Repository) migrate() {
+	version := r.header.Version
+	if version == 0 {
+		version = 1
+	}
+	if version < 2 {
+		var previous *string
+		for i := range r.entries {
+			if r.entries[i].ID == "" {
+				r.entries[i].ID = newID()
+			}
+			r.entries[i].ParentID = previous
+			previous = &r.entries[i].ID
+		}
+	}
+	if version < 3 {
+		for i := range r.entries {
+			if r.entries[i].Message != nil && r.entries[i].Message.Role == "hookMessage" {
+				r.entries[i].Message.Role = "custom"
+			}
+		}
+	}
+	if len(r.entries) > 0 {
+		r.leaf = &r.entries[len(r.entries)-1].ID
+	}
+	if r.header.Version < CurrentVersion {
+		r.header.Version = CurrentVersion
+	}
+}
+
 func (r *Repository) write(value any) error {
 	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
@@ -147,9 +193,10 @@ func (r *Repository) AppendThinking(level string) error {
 }
 
 func (r *Repository) Thinking() string {
-	for i := len(r.entries) - 1; i >= 0; i-- {
-		if r.entries[i].Type == "thinking_level_change" && r.entries[i].Thinking != "" {
-			return r.entries[i].Thinking
+	path := r.BranchEntries()
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i].Type == "thinking_level_change" && path[i].Thinking != "" {
+			return path[i].Thinking
 		}
 	}
 	return ""
@@ -157,8 +204,15 @@ func (r *Repository) Thinking() string {
 
 // AppendCompaction marks a context boundary. Context() starts from this
 // summary when rebuilding a resumed transcript.
+// AppendCompaction records a context boundary without retaining entries
+// before it. Use AppendCompactionAt when a caller knows the first entry that
+// should remain visible after compaction.
 func (r *Repository) AppendCompaction(summary string) error {
-	e := Entry{Type: "compaction", ID: newID(), ParentID: r.leaf, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Summary: summary}
+	return r.AppendCompactionAt(summary, "", 0)
+}
+
+func (r *Repository) AppendCompactionAt(summary, firstKeptEntryID string, tokensBefore int) error {
+	e := Entry{Type: "compaction", ID: newID(), ParentID: r.leaf, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Summary: summary, FirstKeptEntryID: firstKeptEntryID, TokensBefore: tokensBefore}
 	if err := r.write(e); err != nil {
 		return err
 	}
@@ -179,9 +233,10 @@ func (r *Repository) AppendName(name string) error {
 }
 
 func (r *Repository) Name() string {
-	for i := len(r.entries) - 1; i >= 0; i-- {
-		if r.entries[i].Type == "session_info" && r.entries[i].Name != "" {
-			return r.entries[i].Name
+	path := r.BranchEntries()
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i].Type == "session_info" && path[i].Name != "" {
+			return path[i].Name
 		}
 	}
 	return ""
@@ -191,24 +246,180 @@ func (r *Repository) Name() string {
 // been recorded. Entries are walked backwards because the session is an
 // append-only log and later changes supersede earlier ones.
 func (r *Repository) Model() (provider, modelID string, ok bool) {
-	for i := len(r.entries) - 1; i >= 0; i-- {
-		entry := r.entries[i]
+	path := r.BranchEntries()
+	for i := len(path) - 1; i >= 0; i-- {
+		entry := path[i]
 		if entry.Type == "model_change" && entry.Provider != "" && entry.ModelID != "" {
 			return entry.Provider, entry.ModelID, true
+		}
+		if entry.Type == "message" && entry.Message != nil && entry.Message.Role == "assistant" && entry.Message.Provider != "" && entry.Message.Model != "" {
+			return entry.Message.Provider, entry.Message.Model, true
 		}
 	}
 	return "", "", false
 }
+
+// LeafID returns the entry currently selected for appends and context.
+func (r *Repository) LeafID() string {
+	if r.leaf == nil {
+		return ""
+	}
+	return *r.leaf
+}
+
+// Branch selects an existing entry as the active leaf. Existing entries remain
+// immutable; the next append creates a child of the selected entry.
+func (r *Repository) Branch(entryID string) error {
+	if entryID == "" {
+		return fmt.Errorf("entry id is empty")
+	}
+	for i := range r.entries {
+		if r.entries[i].ID == entryID {
+			r.leaf = &r.entries[i].ID
+			return nil
+		}
+	}
+	return fmt.Errorf("entry %q not found", entryID)
+}
+
+// ResetLeaf starts a new root branch. This is used when navigating before the
+// first message, and mirrors Pi's resetLeaf behavior.
+func (r *Repository) ResetLeaf() { r.leaf = nil }
+
+// GetEntry returns a defensive copy of an entry by id.
+func (r *Repository) GetEntry(entryID string) (Entry, bool) {
+	for _, entry := range r.entries {
+		if entry.ID == entryID {
+			return entry, true
+		}
+	}
+	return Entry{}, false
+}
+
+// Children returns direct children in append order.
+func (r *Repository) Children(parentID string) []Entry {
+	out := make([]Entry, 0)
+	for _, entry := range r.entries {
+		if entry.ParentID != nil && *entry.ParentID == parentID {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// BranchEntries walks from the selected leaf to the root and returns the path
+// in prompt order. If entryID is supplied, that entry is used without changing
+// the active leaf.
+func (r *Repository) BranchEntries(entryID ...string) []Entry {
+	leafID := r.LeafID()
+	if len(entryID) > 0 {
+		leafID = entryID[0]
+	}
+	if leafID == "" {
+		return nil
+	}
+	byID := make(map[string]Entry, len(r.entries))
+	for _, entry := range r.entries {
+		byID[entry.ID] = entry
+	}
+	path := make([]Entry, 0)
+	current, ok := byID[leafID]
+	for ok {
+		path = append(path, current)
+		if current.ParentID == nil {
+			break
+		}
+		current, ok = byID[*current.ParentID]
+	}
+	for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+		path[i], path[j] = path[j], path[i]
+	}
+	return path
+}
+
+// FirstRetainedMessageID returns the entry id of the message at the start of
+// the last count active message entries. It lets compaction persist the same
+// retained tail that the runtime keeps in memory.
+func (r *Repository) FirstRetainedMessageID(count int) string {
+	if count < 1 {
+		return ""
+	}
+	path := r.BranchEntries()
+	messages := make([]Entry, 0)
+	for _, entry := range path {
+		if entry.Type == "message" && entry.Message != nil {
+			messages = append(messages, entry)
+		}
+	}
+	if len(messages) == 0 {
+		return ""
+	}
+	index := len(messages) - count
+	if index < 0 {
+		index = 0
+	}
+	return messages[index].ID
+}
+
+// AppendBranchSummary records a Pi-compatible branch summary under a selected
+// historical node and makes the new summary the active leaf.
+func (r *Repository) AppendBranchSummary(fromID, summary string) error {
+	if fromID != "" {
+		if _, ok := r.GetEntry(fromID); !ok {
+			return fmt.Errorf("entry %q not found", fromID)
+		}
+		if err := r.Branch(fromID); err != nil {
+			return err
+		}
+	}
+	entry := Entry{Type: "branch_summary", ID: newID(), ParentID: r.leaf, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), FromID: fromID, Summary: summary}
+	if err := r.write(entry); err != nil {
+		return err
+	}
+	r.entries = append(r.entries, entry)
+	r.leaf = &r.entries[len(r.entries)-1].ID
+	return nil
+}
+
 func (r *Repository) Context() []agent.Message {
-	out := []agent.Message{}
-	for _, e := range r.entries {
-		switch e.Type {
+	path := r.BranchEntries()
+	if len(path) == 0 {
+		return nil
+	}
+	latestCompaction := -1
+	for i, entry := range path {
+		if entry.Type == "compaction" {
+			latestCompaction = i
+		}
+	}
+	if latestCompaction >= 0 {
+		compaction := path[latestCompaction]
+		start := latestCompaction
+		if compaction.FirstKeptEntryID != "" {
+			for i := 0; i < latestCompaction; i++ {
+				if path[i].ID == compaction.FirstKeptEntryID {
+					start = i
+					break
+				}
+			}
+		}
+		kept := append([]Entry(nil), path[start:latestCompaction]...)
+		path = append([]Entry{{Type: "compaction", Summary: compaction.Summary}}, kept...)
+		path = append(path, r.BranchEntries()[latestCompaction+1:]...)
+	}
+	out := make([]agent.Message, 0)
+	for _, entry := range path {
+		switch entry.Type {
 		case "message":
-			if e.Message != nil {
-				out = append(out, *e.Message)
+			if entry.Message != nil {
+				out = append(out, *entry.Message)
 			}
 		case "compaction":
-			out = []agent.Message{{Role: "system", Content: "Previous conversation summary:\n" + e.Summary}}
+			out = append(out, agent.Message{Role: "system", Content: "Previous conversation summary:\n" + entry.Summary})
+		case "branch_summary":
+			if entry.Summary != "" {
+				out = append(out, agent.Message{Role: "user", Content: "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n" + entry.Summary + "\n</summary>"})
+			}
 		}
 	}
 	return out
@@ -218,25 +429,104 @@ func (r *Repository) Path() string     { return r.path }
 func (r *Repository) Header() Header   { return r.header }
 func (r *Repository) Entries() []Entry { return append([]Entry(nil), r.entries...) }
 
+// TreeItem is a flattened view of the session tree for a terminal picker.
+type TreeItem struct {
+	ID     string
+	Label  string
+	Depth  int
+	Active bool
+}
+
+// TreeItems returns entries in deterministic depth-first order. It includes
+// state entries (model changes, names, compactions) because Pi's tree picker
+// navigates the complete append-only tree rather than only messages.
+func (r *Repository) TreeItems() []TreeItem {
+	byParent := make(map[string][]Entry)
+	roots := make([]Entry, 0)
+	for _, entry := range r.entries {
+		if entry.ParentID == nil {
+			roots = append(roots, entry)
+		} else {
+			byParent[*entry.ParentID] = append(byParent[*entry.ParentID], entry)
+		}
+	}
+	label := func(entry Entry) string {
+		name := entry.Type
+		switch entry.Type {
+		case "message":
+			if entry.Message != nil {
+				name = entry.Message.Role
+				if entry.Message.Content != "" {
+					name += ": " + strings.TrimSpace(strings.ReplaceAll(entry.Message.Content, "\n", " "))
+				}
+			}
+		case "model_change":
+			name = "model " + entry.Provider + "/" + entry.ModelID
+		case "session_info":
+			name = "name " + entry.Name
+		case "branch_summary":
+			name = "branch summary: " + entry.Summary
+		case "compaction":
+			name = "compaction: " + entry.Summary
+		}
+		return name
+	}
+	items := make([]TreeItem, 0, len(r.entries))
+	var visit func([]Entry, int)
+	visit = func(entries []Entry, depth int) {
+		for _, entry := range entries {
+			items = append(items, TreeItem{ID: entry.ID, Label: label(entry), Depth: depth, Active: entry.ID == r.LeafID()})
+			visit(byParent[entry.ID], depth+1)
+		}
+	}
+	visit(roots, 0)
+	return items
+}
+
 // Tree returns a compact human-readable representation of the current
 // session's append-only entry tree. It is intentionally derived from entries,
 // so it also works for sessions imported from another Pi-compatible client.
 func (r *Repository) Tree() string {
-	var b strings.Builder
-	for _, entry := range r.entries {
-		label := entry.Type
-		switch entry.Type {
-		case "message":
-			if entry.Message != nil {
-				label = "message/" + entry.Message.Role
-			}
-		case "model_change":
-			label = "model " + entry.Provider + "/" + entry.ModelID
-		case "session_info":
-			label = "name " + entry.Name
-		}
-		fmt.Fprintf(&b, "%s  %s\n", entry.ID, label)
+	if len(r.entries) == 0 {
+		return ""
 	}
+	byParent := make(map[string][]Entry)
+	roots := make([]Entry, 0)
+	for _, entry := range r.entries {
+		if entry.ParentID == nil {
+			roots = append(roots, entry)
+		} else {
+			byParent[*entry.ParentID] = append(byParent[*entry.ParentID], entry)
+		}
+	}
+	var b strings.Builder
+	var visit func([]Entry, int)
+	visit = func(entries []Entry, depth int) {
+		for _, entry := range entries {
+			label := entry.Type
+			switch entry.Type {
+			case "message":
+				if entry.Message != nil {
+					label = "message/" + entry.Message.Role
+				}
+			case "model_change":
+				label = "model " + entry.Provider + "/" + entry.ModelID
+			case "session_info":
+				label = "name " + entry.Name
+			case "branch_summary":
+				label = "branch summary"
+			case "compaction":
+				label = "compaction " + entry.Summary
+			}
+			marker := " "
+			if entry.ID == r.LeafID() {
+				marker = ">"
+			}
+			fmt.Fprintf(&b, "%s%s %s  %s\n", strings.Repeat("  ", depth), marker, entry.ID, label)
+			visit(byParent[entry.ID], depth+1)
+		}
+	}
+	visit(roots, 0)
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -265,7 +555,30 @@ func (r *Repository) Clone(dir string, fork bool) (*Repository, error) {
 	if fork {
 		header.ParentSession = r.header.ID
 	}
-	clone := &Repository{path: path, header: header, entries: append([]Entry(nil), r.entries...)}
+	pathEntries := r.BranchEntries()
+	cloneEntries := make([]Entry, 0, len(pathEntries))
+	idMap := make(map[string]string, len(pathEntries))
+	for _, source := range pathEntries {
+		idMap[source.ID] = newID()
+	}
+	for _, source := range pathEntries {
+		entry := source
+		entry.ID = idMap[source.ID]
+		entry.ParentID = nil
+		if source.ParentID != nil {
+			if parent, ok := idMap[*source.ParentID]; ok {
+				parentCopy := parent
+				entry.ParentID = &parentCopy
+			}
+		}
+		if source.Message != nil {
+			message := *source.Message
+			message.ToolCalls = append([]agent.ToolCall(nil), source.Message.ToolCalls...)
+			entry.Message = &message
+		}
+		cloneEntries = append(cloneEntries, entry)
+	}
+	clone := &Repository{path: path, header: header, entries: cloneEntries}
 	if len(clone.entries) > 0 {
 		clone.leaf = &clone.entries[len(clone.entries)-1].ID
 	}
@@ -306,6 +619,64 @@ func List(dir string) ([]Summary, error) {
 	return out, nil
 }
 
+// FindByID resolves an exact or unambiguous prefix session id in dir. Pi's
+// command line accepts partial UUIDs, while exact paths remain supported by
+// Open; keeping resolution here makes TUI, RPC, and CLI behavior consistent.
+func FindByID(dir, id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("session id is empty")
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil {
+		return "", err
+	}
+	matches := make([]string, 0, 1)
+	for _, path := range files {
+		f, openErr := os.Open(path)
+		if openErr != nil {
+			continue
+		}
+		var h Header
+		decodeErr := json.NewDecoder(f).Decode(&h)
+		_ = f.Close()
+		if decodeErr == nil && (h.ID == id || strings.HasPrefix(h.ID, id)) {
+			matches = append(matches, path)
+		}
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("session %q not found", id)
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("session id %q is ambiguous", id)
+	}
+	return matches[0], nil
+}
+
+func OpenByID(dir, id string) (*Repository, error) {
+	path, err := FindByID(dir, id)
+	if err != nil {
+		return nil, err
+	}
+	return Open(path)
+}
+func sessionTimestamp(path string) time.Time {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+	var h Header
+	if err := json.NewDecoder(f).Decode(&h); err != nil {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, h.Timestamp)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}
+
 func Continue(dir string) (*Repository, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	if err != nil {
@@ -315,15 +686,17 @@ func Continue(dir string) (*Repository, error) {
 		return nil, os.ErrNotExist
 	}
 	sort.Slice(files, func(i, j int) bool {
-		a, _ := os.Stat(files[i])
-		b, _ := os.Stat(files[j])
-		if a.ModTime().Equal(b.ModTime()) {
-			// Some filesystems expose coarse mtime precision. Create() uses a
-			// sortable timestamp prefix, so use the path as a deterministic tie
-			// breaker instead of returning an arbitrary session.
-			return files[i] > files[j]
+		ai := sessionTimestamp(files[i])
+		aj := sessionTimestamp(files[j])
+		if !ai.IsZero() && !aj.IsZero() && !ai.Equal(aj) {
+			return ai.After(aj)
 		}
-		return a.ModTime().After(b.ModTime())
+		mi, _ := os.Stat(files[i])
+		mj, _ := os.Stat(files[j])
+		if mi != nil && mj != nil && !mi.ModTime().Equal(mj.ModTime()) {
+			return mi.ModTime().After(mj.ModTime())
+		}
+		return files[i] > files[j]
 	})
 	return Open(files[0])
 }

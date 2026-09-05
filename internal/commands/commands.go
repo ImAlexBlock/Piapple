@@ -25,7 +25,14 @@ func Parse(input string) (Command, bool) {
 
 type Definition struct{ Name, Description, ArgumentHint string }
 
-var Builtins = []Definition{{"settings", "Open settings menu", ""}, {"model", "Select model", "<provider/model>"}, {"tree", "Navigate session tree", ""}, {"thinking", "Set thinking level", "<level>"}, {"export", "Export session", "[path]"}, {"import", "Import a JSONL session", "<path>"}, {"copy", "Copy last agent message", ""}, {"name", "Set session display name", "<name>"}, {"session", "Show session info and stats", ""}, {"fork", "Create a session fork", ""}, {"clone", "Clone the current session", ""}, {"login", "Configure provider authentication", "<provider> [api-key]"}, {"logout", "Remove provider authentication", "<provider>"}, {"new", "Start a new session", ""}, {"compact", "Compact session context", ""}, {"resume", "Resume a different session", ""}, {"reload", "Reload context and settings", ""}, {"quit", "Quit Piapple", ""}, {"exit", "Quit Piapple", ""}}
+var Builtins = []Definition{
+	{"settings", "Open settings menu", ""}, {"model", "Select a model", "<provider/model>"}, {"tree", "Navigate the session tree", ""}, {"thinking", "Set thinking level", "<level>"},
+	{"scoped-models", "Configure models for cycling", ""}, {"export", "Export the current session", "[path]"}, {"import", "Import and resume a JSONL session", "<path>"},
+	{"copy", "Copy the last agent message", ""}, {"name", "Set session display name", "<name>"}, {"session", "Show session info and stats", ""},
+	{"changelog", "Show Piapple changes", ""}, {"hotkeys", "Show keyboard shortcuts", ""}, {"fork", "Create a fork from the current session", ""}, {"clone", "Duplicate the current session", ""},
+	{"login", "Configure provider authentication", "<provider> [api-key]"}, {"logout", "Remove provider authentication", "<provider>"}, {"new", "Start a new session", ""}, {"compact", "Compact session context", ""},
+	{"resume", "Resume a different session", ""}, {"reload", "Reload settings and project instructions", ""}, {"quit", "Quit Piapple", ""}, {"exit", "Quit Piapple", ""},
+}
 
 func Help() string {
 	lines := make([]string, 0, len(Builtins))

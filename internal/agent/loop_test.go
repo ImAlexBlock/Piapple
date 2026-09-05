@@ -76,3 +76,21 @@ func TestLoopConsumesStreamingProvider(t *testing.T) {
 		t.Fatalf("answer=%q delta=%q err=%v", answer, delta, err)
 	}
 }
+
+func TestLoopRejectsMissingRequiredArgumentsBeforeExecution(t *testing.T) {
+	p := &fakeProvider{replies: []agent.Message{{ToolCalls: []agent.ToolCall{{ID: "bad", Name: "echo", Arguments: `{}`}}}, {Content: "recovered"}}}
+	loop := agent.NewLoop(p, []agent.Tool{requiredTool{}}, 2, nil)
+	messages, answer, err := loop.Run(context.Background(), nil)
+	if err != nil || answer != "recovered" || messages[1].Content != "invalid tool arguments: missing required field value" {
+		t.Fatalf("messages=%#v answer=%q err=%v", messages, answer, err)
+	}
+}
+
+type requiredTool struct{}
+
+func (requiredTool) Definition() agent.ToolDefinition {
+	return agent.ToolDefinition{Name: "echo", Parameters: map[string]any{"type": "object", "required": []string{"value"}}}
+}
+func (requiredTool) Execute(context.Context, string) (string, error) {
+	return "should not execute", nil
+}
