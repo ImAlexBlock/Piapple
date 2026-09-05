@@ -4,7 +4,9 @@ Piapple is a small, cross-platform Go coding agent inspired by [Pi](https://gith
 
 ## Included
 
-- Interactive terminal REPL and one-shot CLI mode
+- Full-screen interactive terminal TUI built on Bubble Tea
+- Persistent conversation view, input editor, command handling, history navigation, resize support, alternate screen, and Ctrl+C cancellation
+- Interactive commands: `/help`, `/clear`, `/exit`; one-shot CLI mode for scripts
 - Tool loop with bounded turns and typed JSON tool arguments
 - Built-in `read`, `write`, `edit`, and `bash` tools
 - OpenAI-compatible Chat Completions, Anthropic Messages, and Google Gemini provider adapters
@@ -16,13 +18,11 @@ Piapple is a small, cross-platform Go coding agent inspired by [Pi](https://gith
 ```powershell
 $env:OPENAI_API_KEY = "..."
 go run ./cmd/piapple -provider openai -model gpt-4o-mini
-# Or one-shot mode
+# One-shot mode (useful in scripts)
 go run ./cmd/piapple -provider anthropic -model claude-sonnet-4-5 "Explain this repository"
 ```
 
 Optional flags: `-base-url`, `-api-key`, `-system`, `-max-steps`, `-C`, and `-session`.
-
-In interactive mode use `/help`, `/clear`, and `/exit`.
 
 ## Safety
 

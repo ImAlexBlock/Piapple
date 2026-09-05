@@ -1,4 +1,6 @@
 .gocache/
+.gomodcache/
+/dist/
 /piapple
 /piapple.exe
 *.jsonl
