@@ -128,3 +128,11 @@ func TestGoogleStreamParsesTextAndFunctionCall(t *testing.T) {
 		t.Fatalf("answer=%q final=%#v", answer, final)
 	}
 }
+
+func TestOpenAICompatibleChannelsAreConstructible(t *testing.T) {
+	for _, name := range []string{"xai", "groq", "mistral", "deepseek", "openrouter", "together", "fireworks", "perplexity", "moonshot", "zai", "minimax", "siliconflow", "qwen", "github"} {
+		if _, err := New(name, Config{Model: "test", BaseURL: "http://localhost", APIKey: "key"}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
