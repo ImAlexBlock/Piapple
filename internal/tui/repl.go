@@ -38,10 +38,15 @@ type model struct {
 }
 
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-	userStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
-	dimStyle   = lipgloss.NewStyle().Faint(true)
-	toolStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA726"))
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
+	userStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
+	dimStyle     = lipgloss.NewStyle().Faint(true)
+	toolStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA726"))
+	readyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#66BB6A"))
+	keyStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#80CBC4"))
+	hintStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#9E9E9E"))
+	commandStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CE93D8"))
+	footerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#616161"))
 )
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -91,12 +96,25 @@ func (m *model) allContentLines() []string {
 	}
 	return out
 }
+func keyHint(key, label string) string {
+	return keyStyle.Render(key) + " " + hintStyle.Render(label)
+}
+
 func (m *model) composerLines() []string {
-	input := m.input
-	if input == "" {
-		input = ""
+	prompt := userStyle.Render("piapple> ")
+	if m.busy {
+		prompt = toolStyle.Render("running> ")
 	}
-	return append([]string{userStyle.Render("piapple> ") + input + "▌"}, dimStyle.Render("Enter send • Alt+Enter newline • Ctrl+C cancel/exit • PgUp/PgDown scroll"))
+	input := m.input + "▌"
+	status := readyStyle.Render("● ready")
+	if m.busy {
+		status = toolStyle.Render("● working") + hintStyle.Render("  model and tools are running")
+	}
+	shortcuts := strings.Join([]string{
+		keyHint("Enter", "send"), keyHint("Alt+Enter", "newline"), keyHint("↑↓", "history"),
+		keyHint("PgUp/PgDn", "scroll"), keyHint("Ctrl+C", "cancel / exit"), keyHint("Ctrl+L", "clear view"),
+	}, "  ")
+	return []string{prompt + input, status, footerStyle.Render(shortcuts + "  " + commandStyle.Render("/help"))}
 }
 func (m *model) submit() tea.Cmd {
 	text := strings.TrimSpace(m.input)
@@ -226,7 +244,7 @@ func (m *model) viewportRows() int {
 	if h < 8 {
 		h = 24
 	}
-	return h - 5
+	return h - 6
 }
 func (m *model) View() string {
 	width := m.width
