@@ -128,8 +128,27 @@ func main() {
 		return
 	}
 	notice := startupNotice(cfg)
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		fatal(homeErr.Error())
+	}
+	authPath := auth.Path(home)
 	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, Shell: func(ctx context.Context, command string) (string, error) {
 		return tools.RunShell(ctx, cfg.Workdir, command)
+	}, Login: func(provider, key string) error {
+		credentials, err := auth.Load(authPath)
+		if err != nil {
+			return err
+		}
+		credentials.Set(provider, key)
+		return auth.Save(authPath, credentials)
+	}, Logout: func(provider string) error {
+		credentials, err := auth.Load(authPath)
+		if err != nil {
+			return err
+		}
+		credentials.Delete(provider)
+		return auth.Save(authPath, credentials)
 	}}
 	if err := runner.Run(context.Background()); err != nil {
 		fatal(err.Error())

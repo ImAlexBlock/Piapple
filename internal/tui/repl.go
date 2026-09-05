@@ -20,6 +20,8 @@ type Runner struct {
 	Persist    func([]agent.Message) error
 	Notice     string
 	Shell      func(context.Context, string) (string, error)
+	Login      func(provider, key string) error
+	Logout     func(provider string) error
 }
 type resultMsg struct {
 	messages []agent.Message
@@ -187,6 +189,38 @@ func (m *model) submit() tea.Cmd {
 			return nil
 		case "quit":
 			return tea.Quit
+		case "login":
+			parts := strings.Fields(command.Arguments)
+			if len(parts) != 2 {
+				m.emit("Usage: /login <provider> <api-key>")
+				return nil
+			}
+			if m.runner.Login == nil {
+				m.emit("Credential storage is unavailable.")
+				return nil
+			}
+			if err := m.runner.Login(parts[0], parts[1]); err != nil {
+				m.emit("Login failed: " + err.Error())
+			} else {
+				m.emit("Saved API key for " + parts[0] + ". Use /model or restart with -provider " + parts[0] + " -model <model-id>.")
+			}
+			return nil
+		case "logout":
+			provider := strings.TrimSpace(command.Arguments)
+			if provider == "" {
+				m.emit("Usage: /logout <provider>")
+				return nil
+			}
+			if m.runner.Logout == nil {
+				m.emit("Credential storage is unavailable.")
+				return nil
+			}
+			if err := m.runner.Logout(provider); err != nil {
+				m.emit("Logout failed: " + err.Error())
+			} else {
+				m.emit("Removed API key for " + provider + ".")
+			}
+			return nil
 		default:
 			m.emit("/" + command.Name + " is recognized but has not been migrated yet.")
 			return nil
