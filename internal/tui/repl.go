@@ -405,7 +405,7 @@ func (m *model) submit() tea.Cmd {
 			m.runner.Transcript = nil
 			m.scroll = 0
 			return nil
-		case "quit":
+		case "quit", "exit":
 			return tea.Quit
 		case "settings":
 			if m.runner.SettingsView == nil {
