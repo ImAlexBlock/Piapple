@@ -38,6 +38,25 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		fatal(homeErr.Error())
+	}
+	projectSettings, settingsErr := settings.Load(settings.ProjectPath(cfg.Workdir))
+	if settingsErr != nil {
+		fatal(settingsErr.Error())
+	}
+	userSettings, settingsErr := settings.Load(settings.UserPath(home))
+	if settingsErr != nil {
+		fatal(settingsErr.Error())
+	}
+	var cliModel *settings.ModelRef
+	if cfg.Provider != "" && cfg.Model != "" {
+		cliModel = &settings.ModelRef{Provider: cfg.Provider, ID: cfg.Model}
+	}
+	if selected := settings.Resolve(cliModel, projectSettings, userSettings); selected != nil {
+		cfg.Provider, cfg.Model = selected.Provider, selected.ID
+	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = config.DefaultBaseURL(cfg.Provider)
 	}
@@ -68,10 +87,6 @@ func main() {
 		if cfg.SessionPath != "" {
 			repository, err = session.Open(cfg.SessionPath)
 		} else {
-			home, homeErr := os.UserHomeDir()
-			if homeErr != nil {
-				fatal(homeErr.Error())
-			}
 			dir := session.DefaultDirectory(home, cfg.Workdir)
 			if *continueSession {
 				repository, err = session.Continue(dir)
@@ -154,10 +169,6 @@ func main() {
 		return
 	}
 	notice := startupNotice(cfg)
-	home, homeErr := os.UserHomeDir()
-	if homeErr != nil {
-		fatal(homeErr.Error())
-	}
 	authPath := auth.Path(home)
 	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, Shell: func(ctx context.Context, command string) (string, error) {
 		return tools.RunShell(ctx, cfg.Workdir, command)
