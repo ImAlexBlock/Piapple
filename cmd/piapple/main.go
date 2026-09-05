@@ -11,6 +11,7 @@ import (
 	"github.com/ImAlexBlock/Piapple/internal/agent"
 	"github.com/ImAlexBlock/Piapple/internal/auth"
 	"github.com/ImAlexBlock/Piapple/internal/config"
+	"github.com/ImAlexBlock/Piapple/internal/models"
 	"github.com/ImAlexBlock/Piapple/internal/projectcontext"
 	"github.com/ImAlexBlock/Piapple/internal/provider"
 	"github.com/ImAlexBlock/Piapple/internal/session"
@@ -206,7 +207,7 @@ func main() {
 	}
 	notice := startupNotice(cfg)
 	authPath := auth.Path(home)
-	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, Shell: func(ctx context.Context, command string) (string, error) {
+	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, ModelOptions: models.Catalog(), Shell: func(ctx context.Context, command string) (string, error) {
 		return tools.RunShell(ctx, cfg.Workdir, command)
 	}, Login: func(provider, key string) error {
 		credentials, err := auth.Load(authPath)

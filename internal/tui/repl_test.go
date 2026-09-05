@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
+	"github.com/ImAlexBlock/Piapple/internal/models"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -38,5 +39,25 @@ func TestViewportScrollKeepsComposerAtBottom(t *testing.T) {
 	}
 	if before == after {
 		t.Fatal("page up did not change viewport")
+	}
+}
+
+func TestModelCommandOpensAndAppliesPicker(t *testing.T) {
+	selected := ""
+	r := &Runner{Loop: &agent.Loop{}, ModelOptions: []models.Model{{Provider: "openai", ID: "gpt-4o", Name: "GPT-4o"}, {Provider: "google", ID: "gemini-2.5-flash"}}, SelectModel: func(provider, model string) error {
+		selected = provider + "/" + model
+		return nil
+	}}
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, runner: r}
+	m.input = "/model"
+	if cmd := m.submit(); cmd != nil || !m.picker {
+		t.Fatalf("picker=%v cmd=%v", m.picker, cmd)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
+		t.Fatal("picker selection should be synchronous")
+	}
+	if selected != "google/gemini-2.5-flash" || m.picker {
+		t.Fatalf("selected=%q picker=%v", selected, m.picker)
 	}
 }

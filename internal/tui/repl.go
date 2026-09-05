@@ -8,21 +8,23 @@ import (
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
 	"github.com/ImAlexBlock/Piapple/internal/commands"
+	"github.com/ImAlexBlock/Piapple/internal/models"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 type Runner struct {
-	Loop        *agent.Loop
-	In          io.Reader
-	Out         io.Writer
-	Transcript  []agent.Message
-	Persist     func([]agent.Message) error
-	Notice      string
-	Shell       func(context.Context, string) (string, error)
-	Login       func(provider, key string) error
-	Logout      func(provider string) error
-	SelectModel func(provider, model string) error
+	Loop         *agent.Loop
+	In           io.Reader
+	Out          io.Writer
+	Transcript   []agent.Message
+	Persist      func([]agent.Message) error
+	Notice       string
+	Shell        func(context.Context, string) (string, error)
+	Login        func(provider, key string) error
+	Logout       func(provider string) error
+	SelectModel  func(provider, model string) error
+	ModelOptions []models.Model
 }
 type resultMsg struct {
 	messages []agent.Message
@@ -40,6 +42,8 @@ type model struct {
 	cancel        context.CancelFunc
 	scroll        int
 	follow        bool
+	picker        bool
+	pickerIndex   int
 	width, height int
 }
 
@@ -130,9 +134,38 @@ func (m *model) composerBox(width int) string {
 	return box.Width(width - 2).Render(strings.Join(wrapped, "\n"))
 }
 
+func (m *model) pickerHeight() int {
+	if !m.picker {
+		return 0
+	}
+	return len(m.runner.ModelOptions) + 2
+}
+
+func (m *model) pickerView(width int) string {
+	if !m.picker {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(commandStyle.Render("Select model") + " " + hintStyle.Render("↑↓ navigate  Enter select  Esc cancel") + "\n")
+	for i, item := range m.runner.ModelOptions {
+		line := "  " + item.Ref()
+		if item.Name != "" && item.Name != item.ID {
+			line += "  " + dimStyle.Render(item.Name)
+		}
+		if i == m.pickerIndex {
+			line = commandStyle.Render("›") + " " + line[2:]
+		}
+		b.WriteString(line)
+		if i+1 < len(m.runner.ModelOptions) {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
 func (m *model) composerHeight(width int) int {
 	boxHeight := lipgloss.Height(m.composerBox(width))
-	return boxHeight + 2 // status and shortcut rows below the bordered input
+	return boxHeight + 2 + m.pickerHeight() // picker, status and shortcut rows
 }
 
 func (m *model) composerView(width int) string {
@@ -146,6 +179,27 @@ func (m *model) composerView(width int) string {
 	}, "  ")
 	return m.composerBox(width) + "\n" + status + "\n" + footerStyle.Render(shortcuts+"  "+commandStyle.Render("/help"))
 }
+func (m *model) selectModel(providerID, modelID string) error {
+	if m.runner.SelectModel == nil {
+		return fmt.Errorf("model selection is unavailable")
+	}
+	return m.runner.SelectModel(providerID, modelID)
+}
+
+func (m *model) selectPickedModel() tea.Cmd {
+	if !m.picker || len(m.runner.ModelOptions) == 0 {
+		return nil
+	}
+	item := m.runner.ModelOptions[m.pickerIndex]
+	m.picker = false
+	if err := m.selectModel(item.Provider, item.ID); err != nil {
+		m.emit("Model selection failed: " + err.Error())
+	} else {
+		m.emit("Selected " + item.Ref())
+	}
+	return nil
+}
+
 func (m *model) submit() tea.Cmd {
 	text := strings.TrimSpace(m.input)
 	if text == "" || m.busy {
@@ -191,19 +245,23 @@ func (m *model) submit() tea.Cmd {
 		case "quit":
 			return tea.Quit
 		case "model":
-			parts := strings.SplitN(strings.TrimSpace(command.Arguments), "/", 2)
-			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			if strings.TrimSpace(command.Arguments) == "" {
+				if len(m.runner.ModelOptions) == 0 {
+					m.emit("No models are available. Use /model <provider/model>.")
+					return nil
+				}
+				m.picker, m.pickerIndex = true, 0
+				return nil
+			}
+			providerID, modelID, err := models.ParseRef(command.Arguments)
+			if err != nil {
 				m.emit("Usage: /model <provider/model>")
 				return nil
 			}
-			if m.runner.SelectModel == nil {
-				m.emit("Model selection is unavailable.")
-				return nil
-			}
-			if err := m.runner.SelectModel(parts[0], parts[1]); err != nil {
+			if err := m.selectModel(providerID, modelID); err != nil {
 				m.emit("Model selection failed: " + err.Error())
 			} else {
-				m.emit("Selected " + parts[0] + "/" + parts[1])
+				m.emit("Selected " + providerID + "/" + modelID)
 			}
 			return nil
 		case "login":
@@ -297,6 +355,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.KeyMsg:
+		if m.picker {
+			switch v.String() {
+			case "esc", "ctrl+c":
+				m.picker = false
+			case "up":
+				if m.pickerIndex > 0 {
+					m.pickerIndex--
+				}
+			case "down":
+				if m.pickerIndex < len(m.runner.ModelOptions)-1 {
+					m.pickerIndex++
+				}
+			case "enter":
+				return m, m.selectPickedModel()
+			}
+			return m, nil
+		}
 		switch v.String() {
 		case "ctrl+c":
 			if m.busy {
@@ -422,6 +497,12 @@ func (m *model) View() string {
 	}
 	b.WriteString(strings.Repeat("─", width))
 	b.WriteByte('\n')
+	if m.picker {
+		b.WriteString(m.pickerView(width))
+		b.WriteByte('\n')
+		b.WriteString(strings.Repeat("─", width))
+		b.WriteByte('\n')
+	}
 	b.WriteString(m.composerView(width))
 	b.WriteByte('\n')
 	return lipgloss.NewStyle().Width(width).Height(height).Render(b.String())
