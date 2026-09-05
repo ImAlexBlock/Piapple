@@ -36,6 +36,8 @@ type Runner struct {
 	ForkSession   func(bool) ([]agent.Message, error)
 	SetThinking   func(string) error
 	Compact       func() error
+	SettingsView  func() string
+	Reload        func() error
 }
 type resultMsg struct {
 	messages []agent.Message
@@ -60,6 +62,7 @@ type model struct {
 	picker        bool
 	pickerIndex   int
 	commandIndex  int
+	loginProvider string
 	width, height int
 }
 
@@ -328,6 +331,14 @@ func (m *model) moveCursor(delta int) {
 }
 
 func (m *model) inputWithCursor() string {
+	if m.loginProvider != "" {
+		masked := []rune(strings.Repeat("•", len([]rune(m.input))))
+		pos := len(masked)
+		if m.cursor < pos {
+			pos = m.cursor
+		}
+		return string(masked[:pos]) + "▌" + string(masked[pos:])
+	}
 	runes := []rune(m.input)
 	if m.cursor < 0 {
 		m.cursor = 0
@@ -341,6 +352,19 @@ func (m *model) inputWithCursor() string {
 func (m *model) submit() tea.Cmd {
 	text := strings.TrimSpace(m.input)
 	if text == "" || m.busy {
+		return nil
+	}
+	if m.loginProvider != "" {
+		providerID := m.loginProvider
+		m.loginProvider = ""
+		m.setInput("")
+		if m.runner.Login == nil {
+			m.emit("Credential storage is unavailable.")
+		} else if err := m.runner.Login(providerID, text); err != nil {
+			m.emit("Login failed: " + err.Error())
+		} else {
+			m.emit("Saved API key for " + providerID + ".")
+		}
 		return nil
 	}
 	m.input = ""
@@ -383,6 +407,22 @@ func (m *model) submit() tea.Cmd {
 			return nil
 		case "quit":
 			return tea.Quit
+		case "settings":
+			if m.runner.SettingsView == nil {
+				m.emit("Settings are unavailable.")
+			} else {
+				m.emit(m.runner.SettingsView())
+			}
+			return nil
+		case "reload":
+			if m.runner.Reload == nil {
+				m.emit("Reload is unavailable.")
+			} else if err := m.runner.Reload(); err != nil {
+				m.emit("Reload failed: " + err.Error())
+			} else {
+				m.emit("Reloaded settings and project instructions.")
+			}
+			return nil
 		case "model":
 			if strings.TrimSpace(command.Arguments) == "" {
 				if len(m.runner.ModelOptions) == 0 {
@@ -520,18 +560,28 @@ func (m *model) submit() tea.Cmd {
 			return nil
 		case "login":
 			parts := strings.Fields(command.Arguments)
-			if len(parts) != 2 {
-				m.emit("Usage: /login <provider> <api-key>")
+			if len(parts) == 0 {
+				m.emit("Usage: /login <provider> [api-key]. Supported: openai, anthropic, google, xai, groq, mistral, deepseek, openrouter")
+				return nil
+			}
+			if len(parts) == 1 {
+				if m.runner.Login == nil {
+					m.emit("Credential storage is unavailable.")
+					return nil
+				}
+				m.loginProvider = parts[0]
+				m.setInput("")
+				m.emit("Enter API key for " + parts[0] + ". The input is masked; press Enter to save.")
 				return nil
 			}
 			if m.runner.Login == nil {
 				m.emit("Credential storage is unavailable.")
 				return nil
 			}
-			if err := m.runner.Login(parts[0], parts[1]); err != nil {
+			if err := m.runner.Login(parts[0], strings.Join(parts[1:], " ")); err != nil {
 				m.emit("Login failed: " + err.Error())
 			} else {
-				m.emit("Saved API key for " + parts[0] + ". Use /model or restart with -provider " + parts[0] + " -model <model-id>.")
+				m.emit("Saved API key for " + parts[0] + ".")
 			}
 			return nil
 		case "new":
@@ -693,6 +743,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch v.String() {
 		case "ctrl+c":
+			if m.loginProvider != "" {
+				m.loginProvider = ""
+				m.setInput("")
+				return m, nil
+			}
 			if m.busy {
 				if m.cancel != nil {
 					m.cancel()

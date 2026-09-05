@@ -15,7 +15,8 @@ type APIKeyCredential struct {
 }
 type File map[string]APIKeyCredential
 
-func Path(home string) string { return filepath.Join(home, ".piapple", "agent", "auth.json") }
+func Path(home string) string       { return filepath.Join(home, ".pi", "agent", "auth.json") }
+func LegacyPath(home string) string { return filepath.Join(home, ".piapple", "agent", "auth.json") }
 func Load(path string) (File, error) {
 	var file File
 	data, err := os.ReadFile(path)

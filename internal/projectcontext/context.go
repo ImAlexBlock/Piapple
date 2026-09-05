@@ -15,9 +15,32 @@ type File struct {
 // Load walks from filesystem root to cwd. At each directory, AGENTS.override.md
 // replaces AGENTS.md/CLAUDE.md, matching Pi's nearest-directory rule.
 func Load(cwd string) ([]File, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	return LoadWithHome(cwd, home)
+}
+
+func LoadWithHome(cwd, home string) ([]File, error) {
 	absolute, err := filepath.Abs(cwd)
 	if err != nil {
 		return nil, err
+	}
+	out := []File{}
+	if home != "" {
+		for _, name := range []string{"AGENTS.override.md", "AGENTS.md", "CLAUDE.md"} {
+			path := filepath.Join(home, ".pi", "agent", name)
+			data, readErr := os.ReadFile(path)
+			if os.IsNotExist(readErr) {
+				continue
+			}
+			if readErr != nil {
+				return nil, readErr
+			}
+			out = append(out, File{Path: path, Content: string(data)})
+			break
+		}
 	}
 	dirs := []string{}
 	for dir := absolute; ; dir = filepath.Dir(dir) {
@@ -26,11 +49,9 @@ func Load(cwd string) ([]File, error) {
 			break
 		}
 	}
-	out := []File{}
 	for i := len(dirs) - 1; i >= 0; i-- {
 		dir := dirs[i]
-		names := []string{"AGENTS.override.md", "AGENTS.md", "CLAUDE.md"}
-		for _, name := range names {
+		for _, name := range []string{"AGENTS.override.md", "AGENTS.md", "CLAUDE.md"} {
 			path := filepath.Join(dir, name)
 			data, readErr := os.ReadFile(path)
 			if os.IsNotExist(readErr) {
@@ -45,6 +66,7 @@ func Load(cwd string) ([]File, error) {
 	}
 	return out, nil
 }
+
 func Format(files []File) string {
 	if len(files) == 0 {
 		return ""

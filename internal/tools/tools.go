@@ -26,6 +26,8 @@ func (b Builtins) All() []agent.Tool {
 	return []agent.Tool{fileTool{b.Workdir, "read"}, fileTool{b.Workdir, "write"}, fileTool{b.Workdir, "edit"}, fileTool{b.Workdir, "bash"}, fileTool{b.Workdir, "grep"}, fileTool{b.Workdir, "find"}, fileTool{b.Workdir, "ls"}}
 }
 
+func Names() []string { return []string{"read", "write", "edit", "bash", "grep", "find", "ls"} }
+
 type fileTool struct{ workdir, name string }
 
 func (t fileTool) Definition() agent.ToolDefinition {

@@ -18,7 +18,10 @@ type Settings struct {
 	EnabledModels []ModelRef `json:"enabledModels,omitempty"`
 }
 
-func UserPath(home string) string   { return filepath.Join(home, ".piapple", "agent", "settings.json") }
+func UserPath(home string) string { return filepath.Join(home, ".pi", "agent", "settings.json") }
+func LegacyUserPath(home string) string {
+	return filepath.Join(home, ".piapple", "agent", "settings.json")
+}
 func ProjectPath(cwd string) string { return filepath.Join(cwd, ".pi", "settings.json") }
 func Load(path string) (Settings, error) {
 	var s Settings

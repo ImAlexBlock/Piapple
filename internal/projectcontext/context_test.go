@@ -33,3 +33,22 @@ func TestLoadFollowsAncestorOrderAndOverride(t *testing.T) {
 		t.Fatal("missing context wrapper")
 	}
 }
+
+func TestLoadWithHomeIncludesPiUserInstructionsFirst(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(cwd, 0755); err != nil {
+		t.Fatal(err)
+	}
+	userDir := filepath.Join(home, ".pi", "agent")
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "AGENTS.md"), []byte("user"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadWithHome(cwd, home)
+	if err != nil || len(got) != 1 || got[0].Content != "user" {
+		t.Fatalf("got=%#v err=%v", got, err)
+	}
+}

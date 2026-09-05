@@ -1,6 +1,9 @@
 package auth
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestCredentialStoreRoundTrip(t *testing.T) {
 	path := t.TempDir() + "/auth.json"
@@ -16,5 +19,11 @@ func TestCredentialStoreRoundTrip(t *testing.T) {
 	got.Delete("openai")
 	if got.Get("openai") != "" {
 		t.Fatal("delete failed")
+	}
+}
+
+func TestPiCompatibleAuthPath(t *testing.T) {
+	if got := Path("C:/home"); got != filepath.Join("C:/home", ".pi", "agent", "auth.json") {
+		t.Fatalf("path=%q", got)
 	}
 }

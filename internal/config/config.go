@@ -11,6 +11,7 @@ type Config struct {
 	BaseURL      string
 	APIKey       string
 	SystemPrompt string
+	Thinking     string
 	MaxSteps     int
 	Workdir      string
 	SessionPath  string

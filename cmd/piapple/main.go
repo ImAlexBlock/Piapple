@@ -18,6 +18,7 @@ import (
 	"github.com/ImAlexBlock/Piapple/internal/provider"
 	"github.com/ImAlexBlock/Piapple/internal/session"
 	"github.com/ImAlexBlock/Piapple/internal/settings"
+	"github.com/ImAlexBlock/Piapple/internal/systemprompt"
 	"github.com/ImAlexBlock/Piapple/internal/tools"
 	"github.com/ImAlexBlock/Piapple/internal/tui"
 )
@@ -74,11 +75,16 @@ func main() {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = config.DefaultBaseURL(cfg.Provider)
 	}
+	baseSystemPrompt := cfg.SystemPrompt
 	contextFiles, err := projectcontext.Load(cfg.Workdir)
 	if err != nil {
 		fatal(err.Error())
 	}
-	cfg.SystemPrompt += projectcontext.Format(contextFiles)
+	promptFiles := make([]systemprompt.ContextFile, 0, len(contextFiles))
+	for _, file := range contextFiles {
+		promptFiles = append(promptFiles, systemprompt.ContextFile{Path: file.Path, Content: file.Content})
+	}
+	cfg.SystemPrompt = systemprompt.Build(cfg.SystemPrompt, cfg.Workdir, promptFiles, tools.Names())
 	if cfg.APIKey == "" {
 		cfg.APIKey = config.APIKeyFromEnvironment(cfg.Provider)
 	}
@@ -330,6 +336,45 @@ func main() {
 			}
 			runner.Loop = selected
 			cfg.Provider, cfg.Model = providerID, modelID
+		}
+		return nil
+	}
+	runner.SettingsView = func() string {
+		projectModel := "not set"
+		if projectSettings.DefaultModel != nil {
+			projectModel = projectSettings.DefaultModel.Provider + "/" + projectSettings.DefaultModel.ID
+		}
+		userModel := "not set"
+		if userSettings.DefaultModel != nil {
+			userModel = userSettings.DefaultModel.Provider + "/" + userSettings.DefaultModel.ID
+		}
+		return fmt.Sprintf("Project settings: %s\nUser settings: %s\nActive model: %s/%s\nThinking: %s\nSystem prompt: %d chars", projectModel, userModel, cfg.Provider, cfg.Model, cfg.Thinking, len(cfg.SystemPrompt))
+	}
+	runner.Reload = func() error {
+		var loadErr error
+		projectSettings, loadErr = settings.Load(settings.ProjectPath(cfg.Workdir))
+		if loadErr != nil {
+			return loadErr
+		}
+		userSettings, loadErr = settings.Load(settings.UserPath(home))
+		if loadErr != nil {
+			return loadErr
+		}
+		contextFiles, loadErr := projectcontext.Load(cfg.Workdir)
+		if loadErr != nil {
+			return loadErr
+		}
+		promptFiles := make([]systemprompt.ContextFile, 0, len(contextFiles))
+		for _, file := range contextFiles {
+			promptFiles = append(promptFiles, systemprompt.ContextFile{Path: file.Path, Content: file.Content})
+		}
+		cfg.SystemPrompt = systemprompt.Build(baseSystemPrompt, cfg.Workdir, promptFiles, tools.Names())
+		if runner.Loop != nil && cfg.Provider != "" && cfg.Model != "" {
+			next, createErr := createLoop(cfg.Provider, cfg.Model)
+			if createErr != nil {
+				return createErr
+			}
+			runner.Loop = next
 		}
 		return nil
 	}

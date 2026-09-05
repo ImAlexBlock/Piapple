@@ -103,3 +103,23 @@ func TestCommandAutocompleteUsesTab(t *testing.T) {
 		t.Fatalf("input=%q cursor=%d", m.input, m.cursor)
 	}
 }
+
+func TestInteractiveLoginMasksAndStoresKey(t *testing.T) {
+	var gotProvider, gotKey string
+	r := &Runner{Loop: &agent.Loop{}, Login: func(provider, key string) error { gotProvider, gotKey = provider, key; return nil }}
+	m := &model{ctx: context.Background(), historyPos: -1, follow: true, runner: r}
+	m.input = "/login openai"
+	m.cursor = len([]rune(m.input))
+	m.submit()
+	if m.loginProvider != "openai" {
+		t.Fatalf("provider=%q", m.loginProvider)
+	}
+	m.setInput("secret")
+	if strings.Contains(m.inputWithCursor(), "secret") {
+		t.Fatal("key leaked in composer")
+	}
+	m.submit()
+	if gotProvider != "openai" || gotKey != "secret" || m.loginProvider != "" {
+		t.Fatalf("provider=%q key=%q mode=%q", gotProvider, gotKey, m.loginProvider)
+	}
+}

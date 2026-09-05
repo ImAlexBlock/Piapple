@@ -56,7 +56,7 @@ func newID() string { b := make([]byte, 8); _, _ = rand.Read(b); return hex.Enco
 func DefaultDirectory(home, cwd string) string {
 	clean := strings.ReplaceAll(filepath.Clean(cwd), ":", "")
 	clean = strings.NewReplacer("\\", "-", "/", "-").Replace(clean)
-	return filepath.Join(home, ".piapple", "agent", "sessions", "--"+clean+"--")
+	return filepath.Join(home, ".pi", "agent", "sessions", "--"+clean+"--")
 }
 func Create(dir, cwd string) (*Repository, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
