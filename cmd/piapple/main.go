@@ -10,6 +10,7 @@ import (
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
 	"github.com/ImAlexBlock/Piapple/internal/config"
+	"github.com/ImAlexBlock/Piapple/internal/projectcontext"
 	"github.com/ImAlexBlock/Piapple/internal/provider"
 	"github.com/ImAlexBlock/Piapple/internal/session"
 	"github.com/ImAlexBlock/Piapple/internal/tools"
@@ -38,6 +39,11 @@ func main() {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = config.DefaultBaseURL(cfg.Provider)
 	}
+	contextFiles, err := projectcontext.Load(cfg.Workdir)
+	if err != nil {
+		fatal(err.Error())
+	}
+	cfg.SystemPrompt += projectcontext.Format(contextFiles)
 	if cfg.APIKey == "" {
 		cfg.APIKey = config.APIKeyFromEnvironment(cfg.Provider)
 	}
