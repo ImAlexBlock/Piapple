@@ -28,7 +28,7 @@ func main() {
 	flag.StringVar(&cfg.SessionPath, "session", "", "JSONL session path")
 	flag.Parse()
 	if cfg.Model == "" {
-		fatal("-model is required")
+		cfg.Model = config.DefaultModel(cfg.Provider)
 	}
 	var err error
 	cfg.Workdir, err = filepath.Abs(cfg.Workdir)
@@ -42,7 +42,7 @@ func main() {
 		cfg.APIKey = config.APIKeyFromEnvironment(cfg.Provider)
 	}
 	if cfg.APIKey == "" {
-		fatal("API key is required: pass -api-key or configure provider environment variable")
+		fatal(fmt.Sprintf("no API key configured for %s; set %s or pass -api-key (selected model: %s)", cfg.Provider, config.EnvironmentVariable(cfg.Provider), cfg.Model))
 	}
 	if cfg.SessionPath != "" && !filepath.IsAbs(cfg.SessionPath) {
 		cfg.SessionPath = filepath.Join(cfg.Workdir, cfg.SessionPath)
