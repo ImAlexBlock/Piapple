@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ImAlexBlock/Piapple/internal/agent"
 )
@@ -47,7 +48,24 @@ func (t fileTool) Definition() agent.ToolDefinition {
 }
 func str() map[string]any { return map[string]any{"type": "string"} }
 func def(name, description string, props map[string]any) agent.ToolDefinition {
-	return agent.ToolDefinition{Name: name, Description: description, Parameters: map[string]any{"type": "object", "properties": props}}
+	required := []string{}
+	switch name {
+	case "read", "ls":
+		required = []string{"path"}
+	case "write":
+		required = []string{"path", "content"}
+	case "edit":
+		required = []string{"path", "edits"}
+	case "grep", "find":
+		required = []string{"pattern"}
+	case "bash":
+		required = []string{"command"}
+	}
+	parameters := map[string]any{"type": "object", "properties": props}
+	if len(required) > 0 {
+		parameters["required"] = required
+	}
+	return agent.ToolDefinition{Name: name, Description: description, Parameters: parameters}
 }
 func (t fileTool) Execute(ctx context.Context, raw string) (string, error) {
 	var args map[string]json.RawMessage
@@ -198,6 +216,13 @@ func (t fileTool) bash(ctx context.Context, args map[string]json.RawMessage) (st
 	command, err := arg(args, "command")
 	if err != nil {
 		return "", err
+	}
+	seconds := 0
+	_ = json.Unmarshal(args["timeout"], &seconds)
+	if seconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
+		defer cancel()
 	}
 	return RunShell(ctx, t.workdir, command)
 }

@@ -66,3 +66,17 @@ func TestReadOnlyDiscoveryTools(t *testing.T) {
 		}
 	}
 }
+
+func TestBuiltinSchemasDeclareRequiredArguments(t *testing.T) {
+	builtins := Builtins{Workdir: t.TempDir()}.All()
+	want := map[string][]string{"read": {"path"}, "write": {"path", "content"}, "edit": {"path", "edits"}, "bash": {"command"}, "grep": {"pattern"}, "find": {"pattern"}}
+	for _, tool := range builtins {
+		definition := tool.Definition()
+		if expected, ok := want[definition.Name]; ok {
+			got, ok := definition.Parameters["required"].([]string)
+			if !ok || len(got) != len(expected) {
+				t.Fatalf("%s required=%#v", definition.Name, definition.Parameters["required"])
+			}
+		}
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 type Loop struct {
@@ -26,8 +27,13 @@ func NewLoop(provider Provider, tools []Tool, maxSteps int, sink EventSink) *Loo
 
 func (l *Loop) definitions() []ToolDefinition {
 	out := make([]ToolDefinition, 0, len(l.Tools))
-	for _, tool := range l.Tools {
-		out = append(out, tool.Definition())
+	names := make([]string, 0, len(l.Tools))
+	for name := range l.Tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		out = append(out, l.Tools[name].Definition())
 	}
 	return out
 }
@@ -90,7 +96,8 @@ func (l *Loop) Run(ctx context.Context, transcript []Message) ([]Message, string
 			if !ok {
 				result = fmt.Sprintf("tool %q is not available", call.Name)
 			} else {
-				if !json.Valid([]byte(call.Arguments)) {
+				var arguments map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil || arguments == nil {
 					result = "invalid tool arguments: expected JSON object"
 				} else {
 					value, toolErr := tool.Execute(ctx, call.Arguments)
