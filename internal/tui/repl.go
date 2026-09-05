@@ -19,6 +19,7 @@ type Runner struct {
 	Transcript []agent.Message
 	Persist    func([]agent.Message) error
 	Notice     string
+	Shell      func(context.Context, string) (string, error)
 }
 type resultMsg struct {
 	messages []agent.Message
@@ -150,6 +151,30 @@ func (m *model) submit() tea.Cmd {
 	m.input = ""
 	m.history = append(m.history, text)
 	m.historyPos = -1
+	if strings.HasPrefix(text, "!") {
+		excluded := strings.HasPrefix(text, "!!")
+		command := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(text, "!"), "!"))
+		if command == "" {
+			m.emit("Shell command is empty.")
+			return nil
+		}
+		if m.runner.Shell == nil {
+			m.emit("Shell execution is unavailable.")
+			return nil
+		}
+		m.emit(toolStyle.Render("$ ") + command)
+		m.busy = true
+		return func() tea.Msg {
+			output, err := m.runner.Shell(m.ctx, command)
+			if err != nil {
+				return resultMsg{err: err}
+			}
+			if !excluded {
+				m.runner.Transcript = append(m.runner.Transcript, agent.Message{Role: "user", Content: "Shell command: " + command + "\n" + output})
+			}
+			return resultMsg{messages: m.runner.Transcript, answer: output}
+		}
+	}
 	if command, ok := commands.Parse(text); ok {
 		switch command.Name {
 		case "help":

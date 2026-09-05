@@ -164,21 +164,25 @@ func (t fileTool) edit(args map[string]json.RawMessage) (string, error) {
 	}
 	return "edited " + p, nil
 }
-func (t fileTool) bash(ctx context.Context, args map[string]json.RawMessage) (string, error) {
-	command, err := arg(args, "command")
-	if err != nil {
-		return "", err
-	}
+func RunShell(ctx context.Context, workdir, command string) (string, error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "cmd.exe", "/C", command)
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-lc", command)
 	}
-	cmd.Dir = t.workdir
+	cmd.Dir = workdir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return limited(string(out)), fmt.Errorf("%w", err)
 	}
 	return limited(string(out)), nil
+}
+
+func (t fileTool) bash(ctx context.Context, args map[string]json.RawMessage) (string, error) {
+	command, err := arg(args, "command")
+	if err != nil {
+		return "", err
+	}
+	return RunShell(ctx, t.workdir, command)
 }

@@ -110,7 +110,9 @@ func main() {
 		return
 	}
 	notice := startupNotice(cfg)
-	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist}
+	runner := tui.Runner{Loop: loop, In: os.Stdin, Out: os.Stdout, Transcript: transcript, Notice: notice, Persist: persist, Shell: func(ctx context.Context, command string) (string, error) {
+		return tools.RunShell(ctx, cfg.Workdir, command)
+	}}
 	if err := runner.Run(context.Background()); err != nil {
 		fatal(err.Error())
 	}
