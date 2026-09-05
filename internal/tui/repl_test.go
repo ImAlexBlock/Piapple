@@ -19,6 +19,9 @@ func TestViewportScrollKeepsComposerAtBottom(t *testing.T) {
 	if !strings.Contains(before, "draft") {
 		t.Fatal("composer is missing")
 	}
+	if !strings.Contains(before, "╭") || !strings.Contains(before, "╰") {
+		t.Fatal("composer is not rendered as a bordered box")
+	}
 	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyPgUp}); cmd != nil {
 		t.Fatal("scroll should not submit a command")
 	}

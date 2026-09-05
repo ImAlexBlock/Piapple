@@ -39,15 +39,18 @@ type model struct {
 }
 
 var (
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-	userStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
-	dimStyle     = lipgloss.NewStyle().Faint(true)
-	toolStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA726"))
-	readyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#66BB6A"))
-	keyStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#80CBC4"))
-	hintStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#9E9E9E"))
-	commandStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CE93D8"))
-	footerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#616161"))
+	titleStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
+	userStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
+	dimStyle         = lipgloss.NewStyle().Faint(true)
+	toolStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA726"))
+	readyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#66BB6A"))
+	keyStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#80CBC4"))
+	hintStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#9E9E9E"))
+	commandStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#CE93D8"))
+	footerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#616161"))
+	inputBoxStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#5C6BC0")).Padding(0, 1)
+	busyBoxStyle     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#FFA726")).Padding(0, 1)
+	placeholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#757575")).Italic(true)
 )
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -105,12 +108,41 @@ func keyHint(key, label string) string {
 	return keyStyle.Render(key) + " " + hintStyle.Render(label)
 }
 
-func (m *model) composerLines() []string {
-	prompt := userStyle.Render("piapple> ")
-	if m.busy {
-		prompt = toolStyle.Render("running> ")
+func (m *model) composerBox(width int) string {
+	innerWidth := width - 6
+	if innerWidth < 16 {
+		innerWidth = 16
 	}
-	input := m.input + "▌"
+	input := m.input
+	if input == "" {
+		input = placeholderStyle.Render("Type a message...")
+	}
+	wrapped := strings.Split(wrap(input, innerWidth), "\n")
+	for index, line := range wrapped {
+		prefix := "         "
+		if index == 0 {
+			prefix = userStyle.Render("piapple> ")
+		}
+		wrapped[index] = prefix + line
+	}
+	if len(wrapped) == 0 {
+		wrapped = []string{userStyle.Render("piapple> ")}
+	}
+	last := len(wrapped) - 1
+	wrapped[last] += "▌"
+	box := inputBoxStyle
+	if m.busy {
+		box = busyBoxStyle
+	}
+	return box.Width(width - 2).Render(strings.Join(wrapped, "\n"))
+}
+
+func (m *model) composerHeight(width int) int {
+	boxHeight := lipgloss.Height(m.composerBox(width))
+	return boxHeight + 2 // status and shortcut rows below the bordered input
+}
+
+func (m *model) composerView(width int) string {
 	status := readyStyle.Render("● ready")
 	if m.busy {
 		status = toolStyle.Render("● working") + hintStyle.Render("  model and tools are running")
@@ -119,7 +151,7 @@ func (m *model) composerLines() []string {
 		keyHint("Enter", "send"), keyHint("Alt+Enter", "newline"), keyHint("↑↓", "history"),
 		keyHint("PgUp/PgDn", "scroll"), keyHint("Ctrl+C", "cancel / exit"), keyHint("Ctrl+L", "clear view"),
 	}, "  ")
-	return []string{prompt + input, status, footerStyle.Render(shortcuts + "  " + commandStyle.Render("/help"))}
+	return m.composerBox(width) + "\n" + status + "\n" + footerStyle.Render(shortcuts+"  "+commandStyle.Render("/help"))
 }
 func (m *model) submit() tea.Cmd {
 	text := strings.TrimSpace(m.input)
@@ -225,9 +257,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "pgup", "ctrl+u":
 			m.follow = false
-			m.scroll += m.viewportRows() / 2
+			m.scroll += m.viewportRows(m.layoutWidth()) / 2
 		case "pgdown", "ctrl+d":
-			m.scroll -= m.viewportRows() / 2
+			m.scroll -= m.viewportRows(m.layoutWidth()) / 2
 			if m.scroll <= 0 {
 				m.scroll = 0
 				m.follow = true
@@ -248,12 +280,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
-func (m *model) viewportRows() int {
+func (m *model) layoutWidth() int {
+	if m.width < 40 {
+		return 80
+	}
+	return m.width
+}
+
+func (m *model) viewportRows(width int) int {
 	h := m.height
 	if h < 8 {
 		h = 24
 	}
-	return h - 6
+	rows := h - 3 - m.composerHeight(width) // header, divider, and composer
+	if rows < 1 {
+		return 1
+	}
+	return rows
 }
 func (m *model) View() string {
 	width := m.width
@@ -265,7 +308,7 @@ func (m *model) View() string {
 		height = 24
 	}
 	content := m.allContentLines()
-	rows := m.viewportRows()
+	rows := m.viewportRows(width)
 	maxScroll := len(content) - rows
 	if maxScroll < 0 {
 		maxScroll = 0
@@ -300,9 +343,7 @@ func (m *model) View() string {
 	}
 	b.WriteString(strings.Repeat("─", width))
 	b.WriteByte('\n')
-	for _, line := range m.composerLines() {
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
+	b.WriteString(m.composerView(width))
+	b.WriteByte('\n')
 	return lipgloss.NewStyle().Width(width).Height(height).Render(b.String())
 }
