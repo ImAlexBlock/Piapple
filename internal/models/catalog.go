@@ -28,6 +28,16 @@ var catalog = []Model{
 	{Provider: "anthropic", ID: "claude-3-5-haiku-latest", Name: "Claude 3.5 Haiku", ContextWindow: 200000},
 	{Provider: "google", ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", ContextWindow: 1048576, Reasoning: true},
 	{Provider: "google", ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", ContextWindow: 1048576, Reasoning: true},
+	{Provider: "xai", ID: "grok-3", Name: "Grok 3", ContextWindow: 131072},
+	{Provider: "groq", ID: "llama-4-scout-17b-16e-instruct", Name: "Llama 4 Scout", ContextWindow: 131072},
+	{Provider: "mistral", ID: "mistral-large-latest", Name: "Mistral Large", ContextWindow: 131072},
+	{Provider: "deepseek", ID: "deepseek-chat", Name: "DeepSeek Chat", ContextWindow: 65536},
+	{Provider: "deepseek", ID: "deepseek-reasoner", Name: "DeepSeek Reasoner", ContextWindow: 65536, Reasoning: true},
+	{Provider: "openrouter", ID: "openai/gpt-4o-mini", Name: "OpenAI GPT-4o mini", ContextWindow: 128000},
+	{Provider: "openrouter", ID: "anthropic/claude-sonnet-4", Name: "Claude Sonnet", ContextWindow: 200000, Reasoning: true},
+	{Provider: "together", ID: "meta-llama/Llama-3.3-70B-Instruct-Turbo", Name: "Llama 3.3 70B", ContextWindow: 131072},
+	{Provider: "fireworks", ID: "accounts/fireworks/models/llama-v3p3-70b-instruct", Name: "Llama 3.3 70B", ContextWindow: 131072},
+	{Provider: "perplexity", ID: "sonar-pro", Name: "Sonar Pro", ContextWindow: 127072},
 }
 
 func Catalog() []Model { return append([]Model(nil), catalog...) }
